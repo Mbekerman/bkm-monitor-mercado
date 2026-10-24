@@ -265,7 +265,7 @@ class TestLogin:
         assert resultado.falhou is True
         assert "401" in (resultado.motivo_falha or "")
 
-    def test_lancamentos_so_busca_unidade_de_novo_e_de_quem_saiu_de_breve(self):
+    def test_lancamentos_abre_so_o_novo_com_detalhe_e_unidades(self):
         pedidos = []
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -278,6 +278,56 @@ class TestLogin:
                     _predio(2, "Em construção", "Em construção"),
                     _predio(3, "Lançamento", "Em construção"),
                 ], "quantity_found": 3})
+            if request.url.path == "/api/portal/buildings/2":
+                detalhe = _predio(2, "Em construção", "Em construção")
+                detalhe.update(
+                    total_units=40, stock=12, opening_date="31/12/2028",
+                    last_updated_pricetable="02/10/2026", launch_date="01/10/2026",
+                    number_of_towers=1,
+                    typologies=[{"id": "t1", "type": "Apartamento"}],
+                )
+                return httpx.Response(200, json=detalhe)
+            if request.url.path == "/api/portal/buildings/2/units":
+                return httpx.Response(200, json={"units": [{
+                    "reference": "101", "section": "A", "status": "Disponível",
+                    "typology_id": "t1", "price": 250000, "private_area": 40,
+                }]})
+            return httpx.Response(404)
+
+        resultado = _cliente(handler).coletar(_ctx("lancamentos", {"1": "pronto", "3": "breve_lancamento"}))
+        assert "/api/elastic" in pedidos
+        assert "/api/portal/buildings/1" not in pedidos
+        assert "/api/portal/buildings/1/units" not in pedidos
+        assert "/api/portal/buildings/3" not in pedidos
+        assert "/api/portal/buildings/3/units" not in pedidos
+        assert pedidos.index("/api/portal/buildings/2") < pedidos.index("/api/portal/buildings/2/units")
+        assert resultado.esperados == 1
+        assert [e["id_externo"] for e in resultado.empreendimentos] == ["2"]
+        emp = resultado.empreendimentos[0]
+        assert emp["unidades_informadas"] == 40
+        assert emp["estoque_informado"] == 12
+        assert emp["previsao_entrega"] == "2028-12-31"
+        assert emp["tabela_atualizada_em"] == "2026-10-02"
+        assert emp["data_lancamento"] == "2026-10-01"
+        assert emp["torres"] == 1
+        assert emp["unidades"][0]["preco"] == 250000
+        assert emp["unidades"][0]["tipo_unidade"] == "Apartamento"
+
+    def test_id_pula_a_listagem_e_reabre_ate_o_conhecido(self):
+        pedidos = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            pedidos.append(request.url.path)
+            if request.url.host == "auth.orulo.com.br":
+                return httpx.Response(200, json={"access_token": "tok"})
+            if request.url.path == "/api/elastic":
+                raise AssertionError("id explícito não varre a listagem")
+            if request.url.path in ("/api/portal/buildings/83029", "/api/portal/buildings/83030"):
+                pid = request.url.path.rsplit("/", 1)[-1]
+                corpo = _predio(pid, "Lançamento", "Em construção")
+                corpo["total_units"] = 8
+                corpo["stock"] = 8
+                return httpx.Response(200, json=corpo)
             if request.url.path.endswith("/units"):
                 return httpx.Response(200, json={"units": [{
                     "reference": "1", "section": "A", "status": "Disponível", "type": "Apartamento",
@@ -285,15 +335,18 @@ class TestLogin:
                 }]})
             return httpx.Response(404)
 
-        resultado = _cliente(handler).coletar(_ctx("lancamentos", {"1": "pronto", "3": "breve_lancamento"}))
-        assert "/api/portal/buildings/1/units" not in pedidos
-        assert "/api/portal/buildings/2/units" in pedidos
-        assert "/api/portal/buildings/3/units" in pedidos
-        assert "/api/portal/buildings/2" not in pedidos
-        por_id = {e["id_externo"]: e for e in resultado.empreendimentos}
-        assert "unidades" not in por_id["1"]
-        assert "unidades" in por_id["2"] and "unidades" in por_id["3"]
-        assert por_id["3"]["situacao"] == "lancamento"
+        ctx = _ctx("lancamentos", {"83029": "lancamento"})
+        ctx.ids = ("83029", "83030")
+        resultado = _cliente(handler).coletar(ctx)
+        assert "/api/elastic" not in pedidos
+        assert "/api/portal/buildings/83029" in pedidos
+        assert "/api/portal/buildings/83029/units" in pedidos
+        assert "/api/portal/buildings/83030" in pedidos
+        assert "/api/portal/buildings/83030/units" in pedidos
+        assert resultado.esperados == 2
+        assert [e["id_externo"] for e in resultado.empreendimentos] == ["83029", "83030"]
+        assert resultado.empreendimentos[0]["unidades_informadas"] == 8
+        assert resultado.empreendimentos[0]["unidades"][0]["preco"] == 10
 
 
 class TestDescoberta:

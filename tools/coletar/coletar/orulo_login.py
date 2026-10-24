@@ -10,7 +10,7 @@ import logging
 
 from coletar.descoberta import descobrir, params_cidade
 from coletar.erros import OruloAuthError, OruloBlocked, OruloError
-from coletar.fonte import ContextoColeta, ResultadoFonte, precisa_unidades
+from coletar.fonte import ContextoColeta, ResultadoFonte, deve_abrir, precisa_unidades
 from coletar.mapeamento import mapear_empreendimento, situacao_empreendimento
 from coletar.orulo_http import ClienteHttp
 
@@ -126,6 +126,29 @@ class OruloLogin:
         forcar = False
         falhou = False
         motivo = None
+
+        def visitar(bid, lista) -> None:
+            nonlocal esperados, forcar, falhou, motivo
+            if forcar or falhou or not deve_abrir(ctx, str(bid)):
+                return
+            esperados += 1
+            try:
+                emp, bruto_item, erro = self._um(ctx, bid, lista)
+            except OruloBlocked as e:
+                falhas.append({"id_externo": str(bid), "motivo": "bloqueado", "detalhe": str(e)[:500]})
+                forcar = True
+                return
+            except OruloAuthError as e:
+                falhou = True
+                motivo = str(e)
+                falhas.append({"id_externo": str(bid), "motivo": "autenticacao", "detalhe": str(e)[:500]})
+                return
+            if erro:
+                falhas.append(erro)
+                return
+            emps.append(emp)
+            itens.append(bruto_item)
+
         try:
             bloqueado_no_login = None
             try:
@@ -135,48 +158,36 @@ class OruloLogin:
             if bloqueado_no_login is not None:
                 falhas.append({"id_externo": "", "motivo": "bloqueado", "detalhe": str(bloqueado_no_login)[:500]})
                 forcar = True
-            for mun in ctx.municipios:
-                if forcar or falhou:
-                    break
-                try:
-                    achados, stats = descobrir(
-                        self.buscar, params_base=params_cidade(mun.uf, mun.nome),
-                        bbox=mun.bbox, cidade=mun.nome,
-                    )
-                except OruloBlocked as e:
-                    falhas.append({"id_externo": "", "motivo": "bloqueado", "detalhe": str(e)[:500]})
-                    forcar = True
-                    break
-                except OruloError as e:
-                    falhas.append({"id_externo": "", "motivo": "descoberta", "detalhe": f"{mun.nome}: {e}"[:500]})
-                    forcar = True
-                    continue
-                if stats["folhas_truncadas"]:
-                    forcar = True
-                    falhas.append({
-                        "id_externo": "", "motivo": "descoberta",
-                        "detalhe": f"{mun.nome}: fatia ainda cheia no limite de profundidade",
-                    })
-                esperados += len(achados)
-                for bid, lista in achados.items():
+            elif ctx.ids:
+                for bid in ctx.ids:
+                    visitar(bid, {"id": str(bid)})
+            else:
+                for mun in ctx.municipios:
+                    if forcar or falhou:
+                        break
                     try:
-                        emp, bruto_item, erro = self._um(ctx, bid, lista)
+                        achados, stats = descobrir(
+                            self.buscar, params_base=params_cidade(mun.uf, mun.nome),
+                            bbox=mun.bbox, cidade=mun.nome,
+                        )
                     except OruloBlocked as e:
-                        falhas.append({"id_externo": str(bid), "motivo": "bloqueado", "detalhe": str(e)[:500]})
+                        falhas.append({"id_externo": "", "motivo": "bloqueado", "detalhe": str(e)[:500]})
                         forcar = True
                         break
-                    except OruloAuthError as e:
-                        falhou = True
-                        motivo = str(e)
-                        falhas.append({"id_externo": str(bid), "motivo": "autenticacao", "detalhe": str(e)[:500]})
-                        break
-                    if erro:
-                        falhas.append(erro)
+                    except OruloError as e:
+                        falhas.append({"id_externo": "", "motivo": "descoberta", "detalhe": f"{mun.nome}: {e}"[:500]})
+                        forcar = True
                         continue
-                    emps.append(emp)
-                    itens.append(bruto_item)
-                if forcar or falhou:
-                    break
+                    if stats["folhas_truncadas"]:
+                        forcar = True
+                        falhas.append({
+                            "id_externo": "", "motivo": "descoberta",
+                            "detalhe": f"{mun.nome}: fatia ainda cheia no limite de profundidade",
+                        })
+                    for bid, lista in achados.items():
+                        visitar(bid, lista)
+                        if forcar or falhou:
+                            break
         finally:
             self.fechar()
         return ResultadoFonte(
@@ -195,11 +206,11 @@ class OruloLogin:
         )
 
     def _um(self, ctx: ContextoColeta, bid, lista: dict):
-        detalhe = None
-        if ctx.tipo == "completa_mensal":
-            detalhe = self.detalhe(bid)
-            if detalhe is None:
-                return None, None, {"id_externo": str(bid), "motivo": "nao_encontrado", "detalhe": "detalhe 404"}
+        # Quem chega aqui é empreendimento novo na semanal, qualquer um na mensal,
+        # ou um id pedido na linha de comando. Os três casos levam detalhe e unidades.
+        detalhe = self.detalhe(bid)
+        if detalhe is None:
+            return None, None, {"id_externo": str(bid), "motivo": "nao_encontrado", "detalhe": "detalhe 404"}
         base = detalhe or lista
         situacao = situacao_empreendimento(base.get("status"), base.get("stage"))
         uns = None

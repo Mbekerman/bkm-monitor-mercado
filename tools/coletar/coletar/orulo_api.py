@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 
 from coletar.erros import OruloAuthError, OruloBlocked, OruloError
-from coletar.fonte import ContextoColeta, ResultadoFonte, precisa_unidades
+from coletar.fonte import ContextoColeta, ResultadoFonte, deve_abrir, precisa_unidades
 from coletar.mapeamento import mapear_empreendimento, situacao_empreendimento
 from coletar.orulo_http import ClienteHttp
 
@@ -129,6 +129,29 @@ class OruloApi:
         forcar = False
         falhou = False
         motivo = None
+
+        def visitar(bid, lista) -> None:
+            nonlocal esperados, forcar, falhou, motivo
+            if forcar or falhou or not deve_abrir(ctx, str(bid)):
+                return
+            esperados += 1
+            try:
+                emp, item, erro = self._um(ctx, bid, lista)
+            except OruloBlocked as e:
+                falhas.append({"id_externo": str(bid), "motivo": "bloqueado", "detalhe": str(e)[:500]})
+                forcar = True
+                return
+            except OruloAuthError as e:
+                falhou = True
+                motivo = str(e)
+                falhas.append({"id_externo": str(bid), "motivo": "autenticacao", "detalhe": str(e)[:500]})
+                return
+            if erro:
+                falhas.append(erro)
+                return
+            emps.append(emp)
+            itens.append(item)
+
         try:
             bloqueado_no_token = None
             try:
@@ -138,44 +161,31 @@ class OruloApi:
             if bloqueado_no_token is not None:
                 falhas.append({"id_externo": "", "motivo": "bloqueado", "detalhe": str(bloqueado_no_token)[:500]})
                 forcar = True
-            for mun in ctx.municipios:
-                if forcar or falhou:
-                    break
-                try:
-                    lista = self.listar(mun.uf, mun.nome)
-                except OruloBlocked as e:
-                    falhas.append({"id_externo": "", "motivo": "bloqueado", "detalhe": str(e)[:500]})
-                    forcar = True
-                    break
-                except OruloAuthError as e:
-                    falhou = True
-                    motivo = str(e)
-                    break
-                except OruloError as e:
-                    falhas.append({"id_externo": "", "motivo": "descoberta", "detalhe": f"{mun.nome}: {e}"[:500]})
-                    forcar = True
-                    continue
-                esperados += len(lista)
-                for bruto in lista:
-                    bid = bruto.get("id")
+            elif ctx.ids:
+                for bid in ctx.ids:
+                    visitar(bid, {"id": str(bid)})
+            else:
+                for mun in ctx.municipios:
+                    if forcar or falhou:
+                        break
                     try:
-                        emp, item, erro = self._um(ctx, bid, bruto)
+                        lista = self.listar(mun.uf, mun.nome)
                     except OruloBlocked as e:
-                        falhas.append({"id_externo": str(bid), "motivo": "bloqueado", "detalhe": str(e)[:500]})
+                        falhas.append({"id_externo": "", "motivo": "bloqueado", "detalhe": str(e)[:500]})
                         forcar = True
                         break
                     except OruloAuthError as e:
                         falhou = True
                         motivo = str(e)
-                        falhas.append({"id_externo": str(bid), "motivo": "autenticacao", "detalhe": str(e)[:500]})
                         break
-                    if erro:
-                        falhas.append(erro)
+                    except OruloError as e:
+                        falhas.append({"id_externo": "", "motivo": "descoberta", "detalhe": f"{mun.nome}: {e}"[:500]})
+                        forcar = True
                         continue
-                    emps.append(emp)
-                    itens.append(item)
-                if forcar or falhou:
-                    break
+                    for bruto in lista:
+                        visitar(bruto.get("id"), bruto)
+                        if forcar or falhou:
+                            break
         finally:
             self.fechar()
         return ResultadoFonte(

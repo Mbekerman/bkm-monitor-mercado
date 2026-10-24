@@ -10,12 +10,17 @@ Não há credencial no repositório. O coletor não foi publicado no Railway.
 cd tools/coletar && pip install -e ".[teste]"
 coletar --tipo mensal --data 2026-10-01 --fonte orulo_login --municipio "São Paulo"
 coletar --tipo lancamentos --data 2026-10-06
+coletar --tipo lancamentos --data 2026-10-06 --id 83029 --id 83030
 coletar --tipo mensal --data 2026-10-01 --fonte orulo_planilha --arquivo /caminho/tabela.xlsx --mapa mapa.json
 ```
 
-`--tipo mensal` grava a coleta `completa_mensal`. `--tipo lancamentos` grava `lancamentos`: só a lista, mais as unidades dos empreendimentos novos e dos que saíram de breve lançamento. Sem `--municipio`, entram São Paulo e São José dos Campos. `--fonte` padrão é `orulo_login`.
+`--tipo mensal` grava a coleta `completa_mensal` e abre cada empreendimento da listagem: detalhe e unidades. `--tipo lancamentos` grava `lancamentos` e só varre a listagem, para achar o que ainda não está no banco. Cada empreendimento novo é aberto um a um, com `detalhe` e unidades (preço de lançamento, tipologias, total de unidades, estoque, datas). Quem já existe não é buscado de novo; a mensal cobre. A espera entre pedidos continua de 2 a 3 segundos.
 
-Saída 0 quando a coleta fecha completa, 2 quando fica incompleta, 3 quando falha (login), 1 em erro de uso.
+`--id` repete e pula a listagem. Serve para testar ou recolher um empreendimento, mesmo que ele já esteja no banco. Cada id passa pela rodada normal (`im_abrir_coleta`, importação, `im_fechar_coleta`). Não vale para `orulo_planilha`.
+
+Sem `--municipio`, entram São Paulo e São José dos Campos. `--fonte` padrão é `orulo_login`.
+
+Saída 0 quando a coleta fecha completa, 2 quando fica incompleta, 3 quando falha (login), 1 em erro de uso ou de rede. Erro de rede (`httpx.HTTPError`, inclusive falha de conexão) marca a coleta aberta como `falhou` e sai com 1, sem traceback.
 
 ## Variáveis
 

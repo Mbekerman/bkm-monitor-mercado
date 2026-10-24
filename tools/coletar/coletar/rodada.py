@@ -7,6 +7,8 @@ import logging
 from dataclasses import dataclass, field
 from datetime import date
 
+import httpx
+
 from coletar.erros import OruloAuthError, OruloBlocked
 from coletar.fonte import ContextoColeta, FonteMercado
 
@@ -44,17 +46,21 @@ def executar(banco, fonte: FonteMercado, ctx: ContextoColeta) -> ResultadoRodada
         ctx.conhecidos = banco.conhecidos(fonte.nome)
     caminho = caminho_bruto(ctx.referencia, ctx.tipo)
     coleta_id = banco.abrir(fonte.nome, ctx.tipo, ctx.referencia, caminho)
+    # A main lê isto se um erro de rede escapar daqui, para chamar im_falhar_coleta.
+    banco.coleta_aberta = coleta_id
     log.info("coleta %s aberta (%s, %s, %s)", coleta_id, fonte.nome, ctx.tipo, ctx.referencia.isoformat())
     try:
         resultado = fonte.coletar(ctx)
     except OruloAuthError as e:
         banco.falhar(coleta_id, str(e))
+        banco.coleta_aberta = None
         log.error("coleta %s falhou: %s", coleta_id, e)
         return ResultadoRodada(coleta_id=coleta_id, situacao="falhou", caminho=caminho, avisos=[str(e)])
     except OruloBlocked as e:
         banco.anotar_falha(coleta_id, "", "bloqueado", str(e))
         banco.gravar_bruto(caminho, gzip.compress(b'{"itens":[]}'))
         banco.fechar_coleta(coleta_id, None, forcar_incompleta=True)
+        banco.coleta_aberta = None
         log.warning("AVISO: coleta incompleta (%s)", e)
         return ResultadoRodada(coleta_id=coleta_id, situacao="incompleta", caminho=caminho, avisos=[str(e)])
 
@@ -73,8 +79,11 @@ def executar(banco, fonte: FonteMercado, ctx: ContextoColeta) -> ResultadoRodada
                 )
         for falha in resultado.falhas:
             banco.anotar_falha(coleta_id, falha.get("id_externo"), falha.get("motivo") or "erro", falha.get("detalhe") or "")
+    except httpx.HTTPError:
+        raise
     except Exception as e:
         banco.falhar(coleta_id, f"importação: {e}")
+        banco.coleta_aberta = None
         log.error("coleta %s falhou na importação: %s", coleta_id, e)
         return ResultadoRodada(coleta_id=coleta_id, situacao="falhou", caminho=caminho, avisos=list(resultado.avisos))
 
@@ -83,6 +92,7 @@ def executar(banco, fonte: FonteMercado, ctx: ContextoColeta) -> ResultadoRodada
 
     if resultado.falhou:
         banco.falhar(coleta_id, resultado.motivo_falha or "falha de autenticação")
+        banco.coleta_aberta = None
         log.error("coleta %s falhou: %s", coleta_id, resultado.motivo_falha)
         return ResultadoRodada(
             coleta_id=coleta_id, situacao="falhou", caminho=caminho,
@@ -94,6 +104,7 @@ def executar(banco, fonte: FonteMercado, ctx: ContextoColeta) -> ResultadoRodada
     fechamento = banco.fechar_coleta(
         coleta_id, resultado.esperados, forcar_incompleta=resultado.forcar_incompleta,
     ) or {}
+    banco.coleta_aberta = None
     situacao = fechamento.get("situacao") or "incompleta"
     log.info(
         "coleta %s: situacao=%s coletados=%s unidades=%s esperados=%s vendas=%s removidas=%s erros=%s ignorados=%s",

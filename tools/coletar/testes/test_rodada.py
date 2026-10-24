@@ -10,6 +10,7 @@ import pytest
 from coletar.cli import main
 from coletar.erros import OruloAuthError
 from coletar.fonte import ContextoColeta, Municipio, ResultadoFonte
+from coletar.orulo_login import OruloLogin
 from coletar.orulo_planilha import AVISO_PLANILHA, OruloPlanilha
 from coletar.rodada import executar
 
@@ -58,8 +59,11 @@ class FonteFixa:
         self.kw = kw
 
     def coletar(self, ctx):
+        self.ctx = ctx
         if self.kw.get("estoura_auth"):
             raise OruloAuthError("401 mesmo após relogin")
+        if self.kw.get("estoura_rede"):
+            raise httpx.ConnectError("conexao recusada")
         return ResultadoFonte(
             empreendimentos=self.emps,
             bruto={"itens": [e.get("id_externo") for e in self.emps]},
@@ -139,6 +143,182 @@ def test_cli_mensal_e_ajuda():
     assert saida.value.code == 0
     assert main(["--tipo", "lancamentos", "--data", "2026-13-01"]) == 1
     assert main(["--tipo", "mensal", "--data", "2026-10-24", "--municipio", "Campinas"]) == 1
+
+
+def _predio(pid):
+    return {
+        "id": pid, "name": f"Predio {pid}", "status": "Em construção", "stage": "Lançamento",
+        "type": "Vertical", "finality": "Residencial",
+        "address": {"city": "São Paulo", "state": "SP", "street": "Rua A", "number": 1,
+                    "latitude": -23.55, "longitude": -46.63, "area": "Centro"},
+        "developer": {"id": "9", "name": "Inc"},
+        "total_units": 4, "stock": 4,
+    }
+
+
+def test_cli_id_passa_pela_rodada_sem_descoberta():
+    pedidos = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        pedidos.append(request.url.path)
+        if request.url.host == "auth.orulo.com.br":
+            return httpx.Response(200, json={"access_token": "tok"})
+        if request.url.path == "/api/elastic":
+            raise AssertionError("id explícito não varre a listagem")
+        if request.url.path in ("/api/portal/buildings/83029", "/api/portal/buildings/12"):
+            return httpx.Response(200, json=_predio(request.url.path.rsplit("/", 1)[-1]))
+        if request.url.path.endswith("/units"):
+            return httpx.Response(200, json={"units": [{
+                "reference": "1", "section": "A", "status": "Disponível", "type": "Apartamento",
+                "price": 10, "private_area": 40,
+            }]})
+        return httpx.Response(404)
+
+    fonte = OruloLogin(
+        email="pessoa@bkm.test", senha="segredo", atraso=(0, 0), sleep=lambda _s: None,
+        transporte=httpx.MockTransport(handler),
+    )
+    banco = BancoMem()
+    banco.conhecidos_map = {"83029": "lancamento"}
+    codigo = main(
+        ["--tipo", "lancamentos", "--data", "2026-10-24", "--id", "83029", "--id", " 12 ", "--id", "83029"],
+        fonte=fonte, banco=banco,
+    )
+    assert codigo == 0
+    assert pedidos.count("/api/portal/buildings/83029") == 1
+    assert "/api/elastic" not in pedidos
+    assert "/api/portal/buildings/83029/units" in pedidos
+    assert "/api/portal/buildings/12" in pedidos
+    assert "/api/portal/buildings/12/units" in pedidos
+    assert banco.chamadas[0] == ("abrir", "orulo_login", "lancamentos", "2026-10-24", "mercado/2026-10-24-lancamentos.json.gz")
+    assert banco.lotes == [2]
+    assert ("fechar", 2, False) in banco.chamadas
+
+
+def test_cli_repassa_os_ids_normalizados():
+    fonte = FonteFixa([{"id_externo": "83029"}])
+    banco = BancoMem()
+    codigo = main(
+        ["--tipo", "mensal", "--data", "2026-10-24", "--id", "83029", "--id", " 12 ", "--id", "83029"],
+        fonte=fonte, banco=banco,
+    )
+    assert codigo == 0
+    assert fonte.ctx.ids == ("83029", "12")
+    assert banco.chamadas[0][0] == "abrir"
+
+
+def test_cli_id_na_planilha_nao_abre_coleta(capsys):
+    banco = BancoMem()
+    codigo = main(
+        ["--tipo", "mensal", "--data", "2026-10-24", "--fonte", "orulo_planilha", "--id", "1"],
+        banco=banco,
+    )
+    assert codigo == 1
+    assert "não coleta por id" in capsys.readouterr().err
+    assert banco.chamadas == []
+
+
+def test_cli_id_vazio(capsys):
+    assert main(["--tipo", "mensal", "--data", "2026-10-24", "--id", " "]) == 1
+    assert "id vazio" in capsys.readouterr().err
+
+
+def test_erro_de_rede_marca_a_coleta_e_sai_1(caplog, capsys):
+    banco = BancoMem()
+    with caplog.at_level("ERROR", logger="coletar"):
+        codigo = main(
+            ["--tipo", "mensal", "--data", "2026-10-24", "--municipio", "São Paulo"],
+            fonte=FonteFixa([], estoura_rede=True), banco=banco,
+        )
+    err = capsys.readouterr().err
+    assert codigo == 1
+    assert "Traceback" not in err
+    assert "erro de rede: ConnectError" in caplog.text
+    assert banco.chamadas[0][0] == "abrir"
+    assert ("falhar", "erro de rede: ConnectError") in banco.chamadas
+
+
+def test_erro_de_rede_antes_de_abrir_so_loga(caplog, capsys):
+    class BancoCai(BancoMem):
+        def conhecidos(self, fonte):
+            raise httpx.ConnectError("sem dns")
+
+    banco = BancoCai()
+    with caplog.at_level("ERROR", logger="coletar"):
+        codigo = main(
+            ["--tipo", "lancamentos", "--data", "2026-10-24"],
+            fonte=FonteFixa([]), banco=banco,
+        )
+    assert codigo == 1
+    assert "Traceback" not in capsys.readouterr().err
+    assert "erro de rede: ConnectError" in caplog.text
+    assert not any(c[0] == "falhar" for c in banco.chamadas)
+    assert not any(c[0] == "abrir" for c in banco.chamadas)
+
+
+def test_connecterror_no_detalhe_falha_a_coleta(caplog, capsys):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "auth.orulo.com.br":
+            return httpx.Response(200, json={"access_token": "tok"})
+        if request.url.path == "/api/elastic":
+            return httpx.Response(200, json={"buildings": [_predio("9")], "quantity_found": 1})
+        raise httpx.ConnectError("caiu")
+
+    fonte = OruloLogin(
+        email="pessoa@bkm.test", senha="segredo", atraso=(0, 0), sleep=lambda _s: None,
+        transporte=httpx.MockTransport(handler),
+    )
+    banco = BancoMem()
+    with caplog.at_level("ERROR", logger="coletar"):
+        codigo = main(
+            ["--tipo", "mensal", "--data", "2026-10-24", "--municipio", "São Paulo"],
+            fonte=fonte, banco=banco,
+        )
+    assert codigo == 1
+    assert "Traceback" not in capsys.readouterr().err
+    assert ("falhar", "erro de rede: ConnectError") in banco.chamadas
+    assert "erro de rede: ConnectError" in caplog.text
+
+
+def test_erro_de_rede_na_descoberta_anota_e_fecha_incompleta(caplog, capsys):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "auth.orulo.com.br":
+            return httpx.Response(200, json={"access_token": "tok"})
+        raise httpx.ConnectError("caiu")
+
+    fonte = OruloLogin(
+        email="pessoa@bkm.test", senha="segredo", atraso=(0, 0), sleep=lambda _s: None,
+        transporte=httpx.MockTransport(handler),
+    )
+    banco = BancoMem()
+    with caplog.at_level("ERROR", logger="coletar"):
+        codigo = main(
+            ["--tipo", "mensal", "--data", "2026-10-24", "--municipio", "São Paulo"],
+            fonte=fonte, banco=banco,
+        )
+    err = capsys.readouterr().err
+    assert codigo == 2
+    assert "Traceback" not in err
+    assert ("anotar", "", "descoberta") in banco.chamadas
+    assert banco.chamadas[-1][0] == "fechar" and banco.chamadas[-1][2] is True
+    assert not any(c[0] == "falhar" for c in banco.chamadas)
+
+
+def test_erro_de_rede_na_importacao_falha_uma_vez(caplog, capsys):
+    class BancoImporta(BancoMem):
+        def importar(self, coleta, emps):
+            raise httpx.ConnectError("caiu")
+
+    banco = BancoImporta()
+    with caplog.at_level("ERROR", logger="coletar"):
+        codigo = main(
+            ["--tipo", "mensal", "--data", "2026-10-24"],
+            fonte=FonteFixa([{"id_externo": "1"}]), banco=banco,
+        )
+    assert codigo == 1
+    assert "Traceback" not in capsys.readouterr().err
+    assert [c for c in banco.chamadas if c[0] == "falhar"] == [("falhar", "erro de rede: ConnectError")]
+    assert "erro de rede: ConnectError" in caplog.text
 
 
 def test_banco_supabase_monta_rpc_e_storage():

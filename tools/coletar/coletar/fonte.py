@@ -20,6 +20,22 @@ class ContextoColeta:
     municipios: list[Municipio]
     # id externo do empreendimento → situação vigente. Vazio na mensal.
     conhecidos: dict[str, str] = field(default_factory=dict)
+    # Ids pedidos na linha de comando. Quando preenchido, a fonte não varre a listagem.
+    ids: tuple[str, ...] = ()
+
+
+def deve_abrir(ctx: ContextoColeta, id_externo: str) -> bool:
+    """Diz se este empreendimento entra na rodada com detalhe e unidades.
+
+    A mensal abre todos os da listagem. A semanal de lançamentos abre só os que
+    ainda não estão no banco: quem já existe fica para a mensal. Com ids
+    explícitos, abre exatamente esses, mesmo que já existam.
+    """
+    if ctx.ids:
+        return str(id_externo) in ctx.ids
+    if ctx.tipo == "completa_mensal":
+        return True
+    return str(id_externo) not in ctx.conhecidos
 
 
 @dataclass
@@ -41,10 +57,10 @@ class FonteMercado(Protocol):
 
 
 def precisa_unidades(ctx: ContextoColeta, id_externo: str, situacao: str) -> bool:
-    """Mensal traz todas as unidades. Lançamentos, só as dos novos e as de quem saiu de breve lançamento."""
-    if ctx.tipo == "completa_mensal":
-        return True
-    anterior = ctx.conhecidos.get(str(id_externo))
-    if anterior is None:
-        return True
-    return anterior == "breve_lancamento" and situacao != "breve_lancamento"
+    """Unidades acompanham a abertura do empreendimento.
+
+    A situação vigente não reabre a semanal: quem saiu de breve lançamento
+    espera a mensal.
+    """
+    del situacao
+    return deve_abrir(ctx, id_externo)
