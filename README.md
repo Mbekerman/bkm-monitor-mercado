@@ -54,7 +54,7 @@ Variáveis da rodada:
 
 Não existe `EMPRESA_ID`. A semanal de lançamentos só varre a listagem e abre, um a um, o empreendimento que ainda não está no banco (detalhe e unidades). `--id` recolhe um ou mais empreendimentos sem essa varredura. O detalhe do comando, da planilha e dos dois crons está em [docs/coletar.md](docs/coletar.md).
 
-Vendas, dia 1 às 03:00 em São Paulo: `tools/coletar/railway.mensal.json`, cron `0 6 1 * *`. Lançamentos, segunda no mesmo horário: `tools/coletar/railway.lancamentos.json`, cron `0 6 * * 1`. Os arquivos estão prontos para um projeto Railway próprio. Este repositório não faz o deploy.
+Vendas (`coleta-mensal`), dia 1 às 00:10 em São Paulo: `tools/coletar/railway.mensal.json`, cron `10 3 1 * *` (03:10 UTC). Lançamentos (`coleta-lancamentos`), segunda às 06:00 em São Paulo: `tools/coletar/railway.lancamentos.json`, cron `0 9 * * 1` (09:00 UTC). Os arquivos estão prontos para um projeto Railway próprio. Este repositório não faz o deploy.
 
 ## Como o BKM Terrenos lê
 
