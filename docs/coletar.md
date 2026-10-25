@@ -1,6 +1,6 @@
 # Coletor do monitor de mercado
 
-O coletor fica em `tools/coletar` (Python 3.11+, pacote `coletar`). A regra continua no banco: o comando só busca a fonte, grava o bruto e chama `im_abrir_coleta`, `im_importar` (lotes de 50), `im_anotar_falha`, `im_falhar_coleta` e `im_fechar_coleta`. A interface é `FonteMercado`. Os adaptadores são `orulo_login` (completo), `orulo_planilha` (leitor à espera de amostra real) e `orulo_api` (esqueleto OAuth2 da API v2). As tabelas que ele lê são `im_ids_externos` e `im_empreendimento_estados`. O prefixo `im_` é minúsculo e sem aspas. Não há `empresa_id`.
+O coletor fica em `tools/coletar` (Python 3.11+, pacote `coletar`). A regra continua no banco: o comando só busca a fonte, grava o bruto e chama `im_abrir_coleta`, `im_importar` (lotes de até 50 empreendimentos e 400 unidades; empreendimento maior vai em partes, ver abaixo), `im_anotar_falha`, `im_falhar_coleta` e `im_fechar_coleta`. A interface é `FonteMercado`. Os adaptadores são `orulo_login` (completo), `orulo_planilha` (leitor à espera de amostra real) e `orulo_api` (esqueleto OAuth2 da API v2). As tabelas que ele lê são `im_ids_externos` e `im_empreendimento_estados`. O prefixo `im_` é minúsculo e sem aspas. Não há `empresa_id`.
 
 Não há credencial no repositório. Os crons rodam no Railway, nos serviços `coleta-mensal` e `coleta-lancamentos`.
 
@@ -31,11 +31,24 @@ Saída 0 quando a coleta fecha completa, 2 quando fica incompleta, 3 quando falh
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | API do Supabase. A chave não vai para o repositório. |
 | `ORULO_ATRASO_MIN`, `ORULO_ATRASO_MAX` | Espera entre pedidos, em segundos. Padrão 2 e 3. |
 | `COLETAR_TIPO` | No cron: `mensal` ou `lancamentos`. |
+| `COLETAR_UNIDADES_POR_CHAMADA`, `COLETAR_UNIDADES_MINIMO` | Unidades por chamada de `im_importar` (padrão 400) e o menor pedaço (padrão 25). Ver "Importação em partes". |
 | `COLETAR_PG_DSN`, `COLETAR_BRUTO_DIR` | Só para um Postgres local, no lugar do Supabase. O teste ponta a ponta usa isso por conta própria. |
 
 `orulo_login` espera de 2 a 3 segundos entre pedidos, refaz o login uma vez em 401 e para em 429 ou 403 (a coleta fecha incompleta). O segundo 401 encerra como `falhou`. O client id do site (`CLIENT_ID` no código) é público; não é senha.
 
 O bruto vai para o bucket privado `im-bruto`, no caminho `mercado/{referencia}-{tipo}.json.gz`.
+
+## Importação em partes
+
+`im_importar` passa pela API do Supabase, com limite de 8 s por chamada. Até a migration `fechar_em_conjunto`, cada chamada também recalculava os totais da coleta, um custo que crescia com a coleta (com ~400 mil unidades passava de 5 s). Agora os totais (`coletados`, `unidades`, `tipos_desconhecidos`) só são calculados em `im_fechar_coleta`, e `im_importar` devolve `coletados` e `unidades` nulos. Mesmo assim o coletor (`coletar/importacao.py`) manda até 400 unidades por chamada: empreendimentos pequenos vão juntos, e o empreendimento maior vai em partes de unidades. Se o banco estoura o tempo (57014), o pedaço cai pela metade, até 25 unidades, e o tamanho menor fica valendo. Erro transitório (5xx, 429, queda de rede) é tentado de novo até 3 vezes.
+
+O resultado é o mesmo de uma chamada só: venda, unidade removida e vínculo só saem em `im_fechar_coleta`; unidades com a mesma torre/número vão sempre juntas e na ordem; e cada parte leva representantes de todos os tipos de unidade, para o filtro "tem unidade residencial" dar igual. Empreendimento com unidade que o banco recusa (valor fora da coluna) falha inteiro, como antes. Uma parte que mesmo assim volte com erro vira a falha `importacao_parcial` e aviso no log. Empreendimento com `importacao_parcial` não tem unidade marcada como removida no fechamento: a unidade que faltou pode estar só na parte que falhou.
+
+## Fechamento
+
+`im_fechar_coleta(coleta, esperados, forcar_incompleta)` faz tudo em comandos de conjunto (antes era um laço por unidade, que levava horas numa carga mensal de ~400 mil unidades): totais, vínculo, venda vista (`ultimo_visto`), venda anterior ao monitor (`estimado`, pela mediana do m² das disponíveis do mesmo empreendimento, dormitórios e vagas, área até 3% diferente), venda desfeita e unidade removida. Mesmo resultado da versão com laço (`testes/test_fechamento_e2e.py`). Numa base desse tamanho ainda passa dos 8 s da API; o fechamento de 2026-10 rodou pelo SQL direto, em cerca de 2 minutos.
+
+Cobertura: `esperados` é o número de empreendimentos visitados pelo coletor, inclusive os que ficaram fora do filtro. O fechamento desconta os que têm falha `fora_do_filtro` e não entraram nesta coleta (`esperados_no_filtro`). A coleta fica `incompleta` se `coletados` < 90% de `esperados_no_filtro` (`cobertura_minima_pct`) ou < 90% da mensal anterior. O CLI continua mandando os visitados; não há mudança no Railway.
 
 ## Planilha
 

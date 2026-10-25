@@ -27,7 +27,8 @@ def _run(cmd: list[str], **kw):
 
 
 class Cluster:
-    def __init__(self):
+    def __init__(self, ate: str | None = None):
+        """ate: só as migrations com nome até este (para comparar versões)."""
         self.base = Path(tempfile.mkdtemp(prefix="coletar-pg-"))
         self.dir = self.base / "pg"
         self.dir.mkdir()
@@ -49,6 +50,8 @@ class Cluster:
                      "-v", "ON_ERROR_STOP=1", "-q"]
         _run([*self.psql, "-f", str(RAIZ / "supabase/tests/shim_supabase.sql")], env=env, stdout=subprocess.DEVNULL)
         for mig in sorted((RAIZ / "supabase/migrations").glob("*.sql")):
+            if ate is not None and mig.name > ate:
+                continue
             _run([*self.psql, "-f", str(mig)], env=env, stdout=subprocess.DEVNULL)
 
     @property

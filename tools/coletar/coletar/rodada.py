@@ -1,9 +1,14 @@
-"""Uma rodada: abre, busca, grava o bruto, importa em lotes de 50 e fecha."""
+"""Uma rodada: abre, busca, grava o bruto, importa em lotes e fecha.
+
+A importação passa por coletar.importacao: até LOTE empreendimentos e
+UNIDADES_POR_CHAMADA unidades por chamada; empreendimento grande vai em partes.
+"""
 from __future__ import annotations
 
 import gzip
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -11,6 +16,7 @@ import httpx
 
 from coletar.erros import OruloAuthError, OruloBlocked
 from coletar.fonte import ContextoColeta, FonteMercado
+from coletar.importacao import UNIDADES_MINIMO, UNIDADES_POR_CHAMADA, Importador
 
 log = logging.getLogger("coletar")
 
@@ -34,6 +40,23 @@ class ResultadoRodada:
 
 def caminho_bruto(referencia: date, tipo: str) -> str:
     return f"mercado/{referencia.isoformat()}-{tipo}.json.gz"
+
+
+def _env_int(nome: str, padrao: int) -> int:
+    try:
+        v = int(os.environ.get(nome, "") or padrao)
+    except ValueError:
+        return padrao
+    return v if v > 0 else padrao
+
+
+def importador(banco, coleta_id: str) -> Importador:
+    return Importador(
+        banco, coleta_id,
+        unidades_por_chamada=_env_int("COLETAR_UNIDADES_POR_CHAMADA", UNIDADES_POR_CHAMADA),
+        minimo=_env_int("COLETAR_UNIDADES_MINIMO", UNIDADES_MINIMO),
+        empreendimentos_por_chamada=LOTE,
+    )
 
 
 def _lotes(itens: list, tamanho: int):
@@ -70,12 +93,18 @@ def executar(banco, fonte: FonteMercado, ctx: ContextoColeta) -> ResultadoRodada
         banco.gravar_bruto(caminho, conteudo)
         log.info("bruto gravado em %s (%s bytes)", caminho, len(conteudo))
         if resultado.empreendimentos:
+            imp = importador(banco, coleta_id)
             for lote in _lotes(resultado.empreendimentos, LOTE):
-                ultimo = banco.importar(coleta_id, lote) or {}
+                ultimo = imp.importar(lote) or {}
                 log.info(
                     "lote de %s: coletados=%s unidades=%s ignorados=%s erros=%s",
                     len(lote), ultimo.get("coletados"), ultimo.get("unidades"),
                     ultimo.get("ignorados"), ultimo.get("erros"),
+                )
+            if imp.parciais:
+                resultado.avisos.append(
+                    "empreendimento importado só em parte (falha importacao_parcial): "
+                    + ", ".join(sorted(set(imp.parciais)))
                 )
         for falha in resultado.falhas:
             banco.anotar_falha(coleta_id, falha.get("id_externo"), falha.get("motivo") or "erro", falha.get("detalhe") or "")
@@ -106,6 +135,10 @@ def executar(banco, fonte: FonteMercado, ctx: ContextoColeta) -> ResultadoRodada
     ) or {}
     banco.coleta_aberta = None
     situacao = fechamento.get("situacao") or "incompleta"
+    # Os totais saem do fechamento (im_importar não recalcula mais a cada chamada).
+    for chave in ("coletados", "unidades"):
+        if fechamento.get(chave) is not None:
+            ultimo[chave] = fechamento[chave]
     log.info(
         "coleta %s: situacao=%s coletados=%s unidades=%s esperados=%s vendas=%s removidas=%s erros=%s ignorados=%s",
         coleta_id, situacao, ultimo.get("coletados"), ultimo.get("unidades"), resultado.esperados,
