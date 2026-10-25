@@ -2,7 +2,7 @@
 
 O coletor fica em `tools/coletar` (Python 3.11+, pacote `coletar`). A regra continua no banco: o comando só busca a fonte, grava o bruto e chama `im_abrir_coleta`, `im_importar` (lotes de 50), `im_anotar_falha`, `im_falhar_coleta` e `im_fechar_coleta`. A interface é `FonteMercado`. Os adaptadores são `orulo_login` (completo), `orulo_planilha` (leitor à espera de amostra real) e `orulo_api` (esqueleto OAuth2 da API v2). As tabelas que ele lê são `im_ids_externos` e `im_empreendimento_estados`. O prefixo `im_` é minúsculo e sem aspas. Não há `empresa_id`.
 
-Não há credencial no repositório. O coletor não foi publicado no Railway.
+Não há credencial no repositório. Os crons rodam no Railway, nos serviços `coleta-mensal` e `coleta-lancamentos`.
 
 ## Comando
 
@@ -47,14 +47,14 @@ Toda rodada desta fonte registra o aviso: o leitor ainda precisa ser validado co
 
 ## Cron no Railway
 
-São dois serviços, no projeto Railway deste repositório, os dois com a imagem `tools/coletar/Dockerfile`. Nada disso foi aplicado.
+São dois serviços, os dois com a imagem `tools/coletar/Dockerfile`. O cron do Railway é UTC.
 
-| Serviço | Config | Cron (UTC) | `COLETAR_TIPO` |
-| --- | --- | --- | --- |
-| Mensal, dia 1 às 03:00 em São Paulo | `tools/coletar/railway.mensal.json` | `0 6 1 * *` | `mensal` |
-| Semanal, segunda às 03:00 em São Paulo | `tools/coletar/railway.lancamentos.json` | `0 6 * * 1` | `lancamentos` |
+| Serviço | Config | Cron (UTC) | Horário em São Paulo | `COLETAR_TIPO` |
+| --- | --- | --- | --- | --- |
+| `coleta-mensal` | `tools/coletar/railway.mensal.json` | `10 3 1 * *` | dia 1 às 00:10 | `mensal` |
+| `coleta-lancamentos` | `tools/coletar/railway.lancamentos.json` | `0 9 * * 1` | segunda às 06:00 | `lancamentos` |
 
-No serviço: caminho do config acima, variáveis da tabela (e-mail e senha no mensal e no semanal, mais `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY`). O cron do Railway é UTC; 06:00 UTC é 03:00 em São Paulo, no mesmo dia. `restartPolicyType` é `NEVER` para o cron não ficar em laço.
+No serviço: caminho do config acima, variáveis da tabela (e-mail e senha no mensal e no semanal, mais `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY`). `10 3 1 * *` é 03:10 UTC, 00:10 em São Paulo, no dia 1. `0 9 * * 1` é 09:00 UTC, 06:00 em São Paulo, na segunda. `restartPolicyType` é `NEVER` para o cron não ficar em laço.
 
 ## Testes
 

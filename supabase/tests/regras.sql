@@ -67,8 +67,12 @@ select pg_temp.ok(
   and not has_function_privilege('service_role', 'public._im_importar_um(uuid, jsonb)', 'execute'),
   'grants: select para authenticated, escrita da função só para service_role, interna fechada');
 
-select pg_temp.ok((select count(*) = 10 and bool_and((codigo in ('apartamento','studio','cobertura','garden','duplex')) = residencial)
+select pg_temp.ok((select count(*) = 12 and bool_and((codigo in ('apartamento','studio','cobertura','garden','duplex','loft','triplex')) = residencial)
   from public.im_tipos_unidade), 'tipos de unidade nascem com a config');
+select pg_temp.ok((select residencial and ativo from public.im_tipos_unidade where codigo = 'loft')
+  and (select residencial and ativo from public.im_tipos_unidade where codigo = 'triplex'), 'loft e triplex nascem residenciais');
+select public._im_semear();
+select pg_temp.ok((select count(*) = 12 from public.im_tipos_unidade), 'semear de novo não duplica loft nem triplex');
 select pg_temp.ok((select meses_lancamento = 6 and dias_preco_lancamento = 60 and meses_recem_entregue = 24
   and nr_conta_como_residencial and :'sp' = any(municipios) and :'sjc' = any(municipios)
   from public.im_config), 'config nasce com os prazos, São Paulo e São José dos Campos');
@@ -199,6 +203,57 @@ select public.im_salvar_config('{"nr_conta_como_residencial": false}');
 select pg_temp.ok((select not residencial from public.im_unidades where empreendimento_id = :'emisto' and numero = '4'), 'desligar o NR tira o studio do residencial');
 select public.im_salvar_config('{"nr_conta_como_residencial": true}');
 select pg_temp.ok((select residencial from public.im_unidades where empreendimento_id = :'emisto' and numero = '4'), 'ligar o NR devolve o studio');
+
+\echo '# NR e categoria'
+select pg_temp.ok(public.im_e_nr('Fort Ipiranga - NR') and public.im_e_nr('Pin Mooca - NR - Breve Lançamento')
+  and public.im_e_nr('TORRE - STUDIO NR') and public.im_e_nr('NÃO RESIDENCIAL') and public.im_e_nr('Torre 2 N.R.')
+  and public.im_e_nr('Unidades não-residenciais'), 'NR no nome, na torre e por extenso');
+select pg_temp.ok(not public.im_e_nr('Monroe') and not public.im_e_nr('Torre NRA') and not public.im_e_nr('Residencial Aurora')
+  and not public.im_e_nr(null), 'NR só como palavra inteira');
+select pg_temp.ok((select categoria = 'residencial_nr' and residencial from public.im_unidades where empreendimento_id = :'emisto' and numero = '4'), 'studio NR é residencial_nr');
+select pg_temp.ok((select categoria = 'residencial' from public.im_unidades where empreendimento_id = :'emisto' and numero = '1'), 'apartamento comum é residencial');
+select pg_temp.ok((select bool_and(categoria = 'nao_residencial') from public.im_unidades where empreendimento_id = :'emisto' and numero in ('3', '5')), 'loja e tipo desconhecido são nao_residencial');
+select public.im_abrir_coleta('manual', 'lancamentos', '2026-04-20') as c_nr \gset
+select pg_temp.ok((public.im_importar(:'c_nr', jsonb_build_array(
+  pg_temp.ej('nr-1', 'Soul Miguel Yunes - NR', jsonb_build_array(
+    pg_temp.uj('11', 30, 300000, 'disponivel', 1, 0, 1, 'Apartamento', 'A', 'nr1'),
+    pg_temp.uj('12', 30, 300000, 'disponivel', 0, 0, 1, 'loja', 'A', 'nr2'))),
+  pg_temp.ej('nr-2', 'Torres Comuns', jsonb_build_array(
+    pg_temp.uj('21', 30, 300000, 'disponivel', 1, 0, 2, 'Studio', 'TORRE A NR', 'nr3'),
+    pg_temp.uj('22', 30, 300000, 'disponivel', 1, 0, 2, 'Studio', 'TORRE B', 'nr4')))
+))->>'ignorados')::int = 0, 'empreendimento NR passa no filtro e é gravado');
+select e.id as enr1 from public.im_empreendimentos e join public.im_ids_externos x on x.entidade_id = e.id and x.id_externo = 'nr-1' \gset
+select e.id as enr2 from public.im_empreendimentos e join public.im_ids_externos x on x.entidade_id = e.id and x.id_externo = 'nr-2' \gset
+select pg_temp.ok((select nr from public.im_empreendimentos where id = :'enr1') and not (select nr from public.im_empreendimentos where id = :'enr2'), 'im_empreendimentos.nr vem do nome');
+select pg_temp.ok((select categoria = 'residencial_nr' and residencial and studio_nr from public.im_unidades where empreendimento_id = :'enr1' and numero = '11'), 'apartamento em empreendimento NR é residencial_nr');
+select pg_temp.ok((select categoria = 'nao_residencial' and not residencial from public.im_unidades where empreendimento_id = :'enr1' and numero = '12'), 'loja em empreendimento NR segue nao_residencial');
+select pg_temp.ok((select categoria = 'residencial_nr' from public.im_unidades where empreendimento_id = :'enr2' and numero = '21')
+  and (select categoria = 'residencial' and not studio_nr from public.im_unidades where empreendimento_id = :'enr2' and numero = '22'), 'torre NR marca só as unidades dela');
+select public.im_salvar_config('{"nr_conta_como_residencial": false}');
+select pg_temp.ok((select not residencial and categoria = 'residencial_nr' from public.im_unidades where empreendimento_id = :'enr1' and numero = '11'), 'desligar o NR tira do residencial e mantém a categoria');
+select public.im_salvar_config('{"nr_conta_como_residencial": true}');
+update public.im_empreendimentos set nome = 'Soul Miguel Yunes' where id = :'enr1';
+select pg_temp.ok((select categoria = 'residencial' and not studio_nr from public.im_unidades where empreendimento_id = :'enr1' and numero = '11'), 'nome sem NR recalcula as unidades');
+update public.im_empreendimentos set nome = 'Soul Miguel Yunes - NR' where id = :'enr1';
+
+\echo '# correção de andar e vagas'
+select pg_temp.ok((public.im_corrigir_andar_vagas(jsonb_build_array(
+  jsonb_build_object('e', 'nr-2', 't', 'Torre A NR', 'n', '21', 'a', null, 'v', null),
+  jsonb_build_object('e', 'nr-2', 't', 'TORRE B', 'n', '22', 'a', 2, 'v', 0),
+  jsonb_build_object('e', 'nao-existe', 't', 'A', 'n', '1', 'a', 1, 'v', 1)), 'manual')->>'atualizadas')::int = 1,
+  'grava só a unidade que difere e ignora empreendimento desconhecido');
+select pg_temp.ok((select andar is null and vagas is null from public.im_unidades where empreendimento_id = :'enr2' and numero = '21'), 'null limpa andar e vagas');
+select pg_temp.ok((public.im_corrigir_andar_vagas(jsonb_build_array(
+  jsonb_build_object('e', 'nr-2', 't', 'Torre A NR', 'n', '21', 'a', null, 'v', null)), 'manual')->>'atualizadas')::int = 0, 'correção é idempotente');
+select public.im_corrigir_andar_vagas(jsonb_build_array(
+  jsonb_build_object('e', 'nr-2', 't', 'TORRE B', 'n', '22', 'a', -1, 'v', 0)), 'manual') as corr_neg \gset
+select pg_temp.ok((:'corr_neg'::jsonb->>'atualizadas')::int = 1
+  and (select andar = -1 and vagas = 0 from public.im_unidades
+       where empreendimento_id = :'enr2' and numero = '22'),
+  'andar negativo de subsolo é gravado');
+select pg_temp.ok(not has_function_privilege('authenticated', 'public.im_corrigir_andar_vagas(jsonb, text)', 'execute')
+  and has_function_privilege('service_role', 'public.im_corrigir_andar_vagas(jsonb, text)', 'execute'), 'correção só para service_role');
+select pg_temp.ok((public.im_fechar_coleta(:'c_nr')->>'situacao') is not null, 'coleta NR fecha');
 select pg_temp.ok((select s.preco is null and 'preco_sentinela' = any(s.marcas) from public.im_unidade_estados s
   join public.im_unidades u on u.id = s.unidade_id
   join public.im_ids_externos x on x.entidade_id = u.empreendimento_id and x.id_externo = 'sent'), 'preço 0,1 é sentinela e não entra como preço');

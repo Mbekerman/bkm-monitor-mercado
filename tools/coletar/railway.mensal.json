@@ -2,7 +2,7 @@
   "$schema": "https://railway.com/railway.schema.json",
   "build": { "builder": "DOCKERFILE", "dockerfilePath": "tools/coletar/Dockerfile" },
   "deploy": {
-    "cronSchedule": "0 6 1 * *",
+    "cronSchedule": "10 3 1 * *",
     "restartPolicyType": "NEVER"
   }
 }

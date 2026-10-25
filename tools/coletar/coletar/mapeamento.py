@@ -206,17 +206,188 @@ def tipo_unidade(unidade: dict, tipologias: dict[str, dict]):
     return None
 
 
-def mapear_unidade(unidade: dict, tipologias: dict[str, dict] | None = None) -> dict:
+# Andar acima disto, sem o número de pavimentos do prédio, é tratado como implausível.
+ANDAR_MAX_SEM_PAVIMENTOS = 45
+
+# Número de unidade só com dígitos, 3 ou 4, sem zero à esquerda: 1708 é andar 17.
+_NUMERO_COM_ANDAR = re.compile(r"^[1-9]\d{2,3}$")
+# Referência que já nasce negativa: "-1" é o nível, "-101" é a unidade 01 do -1.
+_REF_SUBSOLO = re.compile(r"^-(\d+)$")
+_TOKEN_SS_NUM = re.compile(r"^ss(\d+)$")
+_TOKEN_S_NUM = re.compile(r"^s(\d+)$")
+_TOKENS_SUBSOLO = frozenset({"ss", "sub", "subsolo"})
+
+# Texto do empreendimento que diz, com todas as letras, que não há vaga.
+_SEM_VAGA = re.compile(
+    r"\bsem\s+(?:vagas?|garage(?:m|ns))\b"
+    r"|\bnao\s+(?:possui|possuem|tem|temos|ha|oferece|dispoe)\s+(?:de\s+)?(?:vagas?|garage(?:m|ns))\b"
+    r"|\bnenhuma\s+vaga\b"
+)
+
+
+def andar_maximo(bruto: dict | None) -> int | None:
+    """Pavimentos do prédio (number_of_floors), ou None se o Órulo não informa."""
+    n = inteiro((bruto or {}).get("number_of_floors"))
+    return n if n is not None and n > 0 else None
+
+
+def _andar_plausivel(andar: int | None, maximo: int | None) -> bool:
+    if andar is None or andar < 0:
+        return False
+    # +1 deixa passar cobertura/rooftop acima do último pavimento informado
+    limite = maximo + 1 if maximo else ANDAR_MAX_SEM_PAVIMENTOS
+    return andar <= limite
+
+
+def _nivel_referencia_negativa(digitos: str) -> int | None:
+    """'-1' é o andar -1. '-101' segue a regra do número: unidade 01 do andar -1."""
+    n = int(digitos)
+    if n <= 0:
+        return None
+    if len(digitos) >= 3:
+        nivel = n // 100
+        return -nivel if nivel > 0 else None
+    return -n
+
+
+def _marca_subsolo(bruto: str | None, *, aceita_menos: bool) -> int | None:
+    """Nível abaixo do térreo escrito na referência ou na torre, ou None.
+
+    Vale referência que começa com '-' e o token inteiro S1/S2, SS/SS1,
+    subsolo, sub-solo ou SUB, sem acento e sem distinção de maiúsculas.
+    SS, SUB e subsolo, sem número, são o andar -1.
+    """
+    if not bruto:
+        return None
+    if aceita_menos:
+        m = _REF_SUBSOLO.fullmatch(bruto.replace(" ", ""))
+        if m:
+            return _nivel_referencia_negativa(m.group(1))
+    normalizado = norm(bruto)
+    tokens = re.findall(r"[a-z0-9]+", normalizado)
+    for tok in tokens:
+        m = _TOKEN_SS_NUM.fullmatch(tok)
+        if m and int(m.group(1)) > 0:
+            return -int(m.group(1))
+    for tok in tokens:
+        m = _TOKEN_S_NUM.fullmatch(tok)
+        if m and int(m.group(1)) > 0:
+            return -int(m.group(1))
+    if any(tok in _TOKENS_SUBSOLO for tok in tokens) or re.search(r"\bsub[\s-]+solo\b", normalizado):
+        return -1
+    return None
+
+
+def andar_unidade(unidade: dict, maximo: int | None) -> int | None:
+    """Andar da unidade.
+
+    O `floor` do Órulo é derivado do número da unidade e erra quando o número
+    traz a torre ou zero à esquerda ("0907" vira 90, "10001TORREB" vira 100).
+    Andar positivo ou térreo vale quando cabe no prédio (pavimentos + 1, ou 45
+    se o Órulo não informa). Senão, só se tira o andar do número quando ele é
+    inequívoco (3 ou 4 dígitos, sem zero à esquerda) e cabe no prédio.
+
+    Andar negativo só entra com marca de subsolo na referência ou na torre.
+    O `floor` negativo do Órulo vale quando bate com essa marca; senão o nível
+    sai da marca (SS e subsolo sem número viram -1). Sem marca, o negativo
+    fica vazio: 101 com floor -1 é sinal invertido, e não se usa o número.
+    """
+    andar = inteiro(unidade.get("floor"))
+    if andar is not None and andar < 0:
+        nivel = _marca_subsolo(texto(unidade.get("reference")), aceita_menos=True)
+        if nivel is None:
+            nivel = _marca_subsolo(texto(unidade.get("section")), aceita_menos=False)
+        if nivel is None:
+            return None
+        if andar == nivel:
+            return andar
+        return nivel
+    if andar is None:
+        return None
+    if _andar_plausivel(andar, maximo):
+        return andar
+    ref = (texto(unidade.get("reference")) or "").replace(" ", "")
+    if _NUMERO_COM_ANDAR.match(ref):
+        derivado = int(ref) // 100
+        if _andar_plausivel(derivado, maximo):
+            return derivado
+    return None
+
+
+def _textos(v):
+    if isinstance(v, str):
+        yield v
+    elif isinstance(v, dict):
+        for x in v.values():
+            yield from _textos(x)
+    elif isinstance(v, (list, tuple)):
+        for x in v:
+            yield from _textos(x)
+
+
+def declara_sem_vaga(bruto: dict | None) -> bool:
+    """True quando a descrição ou as características dizem que não há vaga."""
+    b = bruto or {}
+    for campo in ("description", "features", "building_features", "unit_features"):
+        for t in _textos(b.get(campo)):
+            if _SEM_VAGA.search(norm(t)):
+                return True
+    return False
+
+
+def vagas_informadas(bruto: dict | None, unidades: list | None) -> bool:
+    """Diz se o Órulo tem o cadastro de vagas deste empreendimento.
+
+    O Órulo manda `parking: 0` tanto para "sem vaga" quanto para "não
+    informado". O zero só vale como zero quando há sinal de que as vagas foram
+    cadastradas: outra unidade ou tipologia com vaga, max_parking do prédio
+    acima de zero, ou o texto dizendo que não há vaga.
+    """
+    b = bruto or {}
+    if any((inteiro(u.get("parking")) or 0) > 0 for u in (unidades or []) if isinstance(u, dict)):
+        return True
+    if any((inteiro(t.get("parking")) or 0) > 0 for t in (b.get("typologies") or []) if isinstance(t, dict)):
+        return True
+    if (inteiro(b.get("max_parking")) or 0) > 0:
+        return True
+    return declara_sem_vaga(b)
+
+
+def vagas_unidade(unidade: dict, informadas: bool) -> int | None:
+    vagas = inteiro(unidade.get("parking"))
+    if vagas is None or vagas < 0:
+        return None
+    if vagas == 0 and not informadas:
+        return None
+    return vagas
+
+
+def mapear_unidade(
+    unidade: dict,
+    tipologias: dict[str, dict] | None = None,
+    *,
+    andar_max: int | None = None,
+    vagas_cadastradas: bool | None = None,
+) -> dict:
+    """Uma unidade do Órulo.
+
+    `andar_max` e `vagas_cadastradas` vêm do empreendimento (ver
+    mapear_empreendimento). Sem esse contexto, andar usa o limite genérico e
+    zero vaga sai vazio, porque não dá para separar "sem vaga" de "não
+    informado".
+    """
     tips = tipologias or {}
+    if vagas_cadastradas is None:
+        vagas_cadastradas = (inteiro(unidade.get("parking")) or 0) > 0
     return {
         "id_externo": None,
         "torre": texto(unidade.get("section")),
         "numero": texto(unidade.get("reference")),
-        "andar": inteiro(unidade.get("floor")),
+        "andar": andar_unidade(unidade, andar_max),
         "area_privativa_m2": area(unidade.get("private_area")),
         "dormitorios": inteiro(unidade.get("bedrooms")),
         "suites": inteiro(unidade.get("suites")),
-        "vagas": inteiro(unidade.get("parking")),
+        "vagas": vagas_unidade(unidade, vagas_cadastradas),
         "tipologia_fonte": None if unidade.get("typology_id") is None else str(unidade.get("typology_id")),
         "tipo_unidade": tipo_unidade(unidade, tips),
         "situacao": situacao_unidade(unidade.get("status")),
@@ -261,5 +432,10 @@ def mapear_empreendimento(lista: dict | None, detalhe: dict | None, unidades: li
         "link_fonte": texto(bruto.get("orulo_url")),
     }
     if incluir_unidades:
-        emp["unidades"] = [mapear_unidade(u, tips) for u in (unidades or []) if isinstance(u, dict)]
+        uns = [u for u in (unidades or []) if isinstance(u, dict)]
+        maximo = andar_maximo(bruto)
+        informadas = vagas_informadas(bruto, uns)
+        emp["unidades"] = [
+            mapear_unidade(u, tips, andar_max=maximo, vagas_cadastradas=informadas) for u in uns
+        ]
     return emp
