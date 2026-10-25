@@ -415,4 +415,48 @@ select pg_temp.ok(not exists (
    where n.nspname = 'public' and c.relname in ('empresas','concorrentes','concorrencia_empreendimentos')),
   'não cria tabela do BKM Terrenos');
 
+-- ---------------------------------------------------------------------
+\echo '# cobertura no filtro, totais no fechamento e importação parcial'
+select public.im_salvar_config('{"cobertura_minima_pct": 90}');
+select public.im_abrir_coleta('orulo_api', 'completa_mensal', '2027-01-01') as c_cob \gset
+select public.im_importar(:'c_cob', jsonb_build_array(
+  pg_temp.ej('parc', 'Parcial', jsonb_build_array(pg_temp.uj('1', 40, 400000), pg_temp.uj('2', 40, 400000), pg_temp.uj('3', 40, 400000))),
+  pg_temp.ej('ctrl', 'Controle', jsonb_build_array(pg_temp.uj('1', 40, 400000), pg_temp.uj('2', 40, 400000), pg_temp.uj('3', 40, 400000))),
+  pg_temp.ej('fc1', 'Comercial 1', jsonb_build_array(pg_temp.uj('1', 40, 400000)), 'vertical', 'comercial'),
+  pg_temp.ej('fc2', 'Comercial 2', jsonb_build_array(pg_temp.uj('1', 40, 400000)), 'vertical', 'comercial'),
+  pg_temp.ej('fc3', 'Comercial 3', jsonb_build_array(pg_temp.uj('1', 40, 400000)), 'vertical', 'comercial'))) as imp_cob \gset
+select pg_temp.ok((:'imp_cob'::jsonb->>'coletados') is null and (:'imp_cob'::jsonb->>'ignorados')::int = 3,
+  'im_importar não recalcula os totais; devolve ignorados');
+select pg_temp.ok((select coletados = 0 and unidades = 0 from public.im_coletas where id = :'c_cob'), 'os totais ficam para o fechamento');
+select public.im_fechar_coleta(:'c_cob', 5) as fc_cob \gset
+select pg_temp.ok((:'fc_cob'::jsonb->>'situacao') = 'completa' and (:'fc_cob'::jsonb->>'esperados_no_filtro')::int = 2
+  and (:'fc_cob'::jsonb->>'fora_do_filtro')::int = 3 and (:'fc_cob'::jsonb->>'coletados')::int = 2,
+  'fora do filtro não conta nos esperados: 2 de 5 visitados fecha completa');
+select pg_temp.ok((select coletados = 2 and unidades = 6 and esperados = 5 from public.im_coletas where id = :'c_cob'),
+  'o fechamento grava os totais e mantém os esperados do coletor');
+select public.im_abrir_coleta('orulo_api', 'completa_mensal', '2027-02-01') as c_cob2 \gset
+select public.im_importar(:'c_cob2', jsonb_build_array(
+  pg_temp.ej('parc', 'Parcial', jsonb_build_array(pg_temp.uj('1', 40, 400000), pg_temp.uj('2', 40, 400000), pg_temp.uj('3', 40, 400000))),
+  pg_temp.ej('ctrl', 'Controle', jsonb_build_array(pg_temp.uj('1', 40, 400000), pg_temp.uj('2', 40, 400000), pg_temp.uj('3', 40, 400000))),
+  pg_temp.ej('fc1', 'Comercial 1', jsonb_build_array(pg_temp.uj('1', 40, 400000)), 'vertical', 'comercial')));
+select public.im_fechar_coleta(:'c_cob2', 6) as fc_cob2 \gset
+select pg_temp.ok((:'fc_cob2'::jsonb->>'situacao') = 'incompleta' and (:'fc_cob2'::jsonb->>'esperados_no_filtro')::int = 5,
+  'faltar no filtro continua deixando incompleta: 2 de 5 no filtro');
+select public.im_abrir_coleta('orulo_api', 'completa_mensal', '2027-03-01') as c_par \gset
+select public.im_importar(:'c_par', jsonb_build_array(
+  pg_temp.ej('parc', 'Parcial', jsonb_build_array(pg_temp.uj('1', 40, 400000))),
+  pg_temp.ej('ctrl', 'Controle', jsonb_build_array(pg_temp.uj('1', 40, 400000), pg_temp.uj('2', 40, 400000)))));
+select public.im_anotar_falha(:'c_par', 'parc', 'importacao_parcial', 'parou na parte 2');
+select pg_temp.ok((public.im_fechar_coleta(:'c_par')->>'removidas')::int = 1, 'só o controle tem unidade removida');
+select pg_temp.ok((select count(*) = 0 from public.im_unidades u join public.im_ids_externos x
+    on x.entidade = 'empreendimento' and x.entidade_id = u.empreendimento_id and x.id_externo = 'parc'
+   where u.removida_coleta_id = :'c_par'), 'importação parcial não marca remoção');
+select pg_temp.ok((select count(*) = 1 from public.im_unidades u join public.im_ids_externos x
+    on x.entidade = 'empreendimento' and x.entidade_id = u.empreendimento_id and x.id_externo = 'ctrl'
+   where u.removida_coleta_id = :'c_par' and u.numero = '3'), 'a que sumiu do controle é removida');
+select pg_temp.ok(not exists (select 1 from pg_class where relname = '_im_fc_alu'), 'tabela de trabalho do fechamento não fica');
+select pg_temp.ok((select count(*) = 2 from regexp_matches(
+    pg_get_functiondef('public.im_fechar_coleta(uuid,int,boolean)'::regprocedure), 'analyze pg_temp\._im_fc_alu', 'g')),
+  'fechamento analisa a tabela de trabalho (sem isso o plano vira laço aninhado)');
+
 \echo 'TODOS OS TESTES PASSARAM'
