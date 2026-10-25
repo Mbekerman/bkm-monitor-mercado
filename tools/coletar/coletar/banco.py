@@ -9,6 +9,7 @@ Não há empresa: o monitor é da BKM inteira.
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from datetime import date
 from pathlib import Path
@@ -23,6 +24,14 @@ except ImportError:  # produção não instala o driver; só o teste local
     Jsonb = None
 
 BUCKET = "im-bruto"
+
+# im_fechar_coleta tem statement_timeout próprio de 10 min (migration fechar_timeout).
+# O cliente espera mais que isso. O gateway da API corta a requisição em ~125 s com
+# 504, mas o banco continua; aí o coletor espera a coleta sair de 'rodando'.
+FECHAR_LEITURA_S = 660.0
+FECHAR_ESPERA_S = 720.0
+FECHAR_INTERVALO_S = 15.0
+_GATEWAY = (502, 503, 504)
 
 
 def _py(valor):
@@ -39,12 +48,15 @@ def _py(valor):
 
 
 class BancoSupabase:
-    def __init__(self, url: str, chave: str, transporte: httpx.BaseTransport | None = None):
+    def __init__(self, url: str, chave: str, transporte: httpx.BaseTransport | None = None, *,
+                 sleep=time.sleep, relogio=time.monotonic):
         if not url or not chave:
             raise ColetaErro("SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY são obrigatórios")
         self.url = url.rstrip("/")
         self.chave = chave
         self.http = httpx.Client(transport=transporte, timeout=120.0)
+        self._sleep = sleep
+        self._relogio = relogio
 
     def fechar(self) -> None:
         self.http.close()
@@ -88,11 +100,70 @@ class BancoSupabase:
         return self._rpc("im_importar", {"p_coleta": coleta_id, "p_dados": empreendimentos}) or {}
 
     def fechar_coleta(self, coleta_id: str, esperados: int | None, *, forcar_incompleta: bool = False) -> dict:
-        return self._rpc("im_fechar_coleta", {
-            "p_coleta": coleta_id,
-            "p_esperados": esperados,
-            "p_forcar_incompleta": forcar_incompleta,
-        }) or {}
+        """im_fechar_coleta. Se a resposta se perde (504 do gateway, leitura estourada,
+        conexão caída), o fechamento pode seguir no banco: espera a coleta sair de
+        'rodando' e devolve o que ficou gravado. Não chama im_falhar_coleta nesse caso."""
+        corpo = {"p_coleta": coleta_id, "p_esperados": esperados, "p_forcar_incompleta": forcar_incompleta}
+        try:
+            r = self.http.post(
+                f"{self.url}/rest/v1/rpc/im_fechar_coleta", headers=self._cabecalhos(), json=corpo,
+                timeout=httpx.Timeout(30.0, read=FECHAR_LEITURA_S),
+            )
+        except (httpx.TimeoutException, httpx.RemoteProtocolError, httpx.ReadError) as e:
+            motivo = type(e).__name__
+        else:
+            if r.status_code not in _GATEWAY:
+                if r.status_code >= 400:
+                    raise ColetaErro(f"im_fechar_coleta retornou {r.status_code}: {r.text[:300]}")
+                if not r.text or r.text == "null":
+                    return {}
+                return r.json()
+            motivo = f"HTTP {r.status_code}"
+        return self._esperar_fechamento(coleta_id, motivo)
+
+    def _esperar_fechamento(self, coleta_id: str, motivo: str) -> dict:
+        import logging
+        log = logging.getLogger("coletar")
+        log.warning("fechamento sem resposta (%s); esperando a coleta %s sair de 'rodando'", motivo, coleta_id)
+        limite = self._relogio() + FECHAR_ESPERA_S
+        while True:
+            try:
+                linhas = self._get("im_coletas", {
+                    "select": "situacao,coletados,unidades,esperados",
+                    "id": f"eq.{coleta_id}",
+                })
+            except (httpx.HTTPError, ColetaErro) as e:
+                log.warning("leitura da coleta falhou (%s); tentando de novo", type(e).__name__)
+                linhas = None
+            if linhas and linhas[0].get("situacao") != "rodando":
+                col = linhas[0]
+                return {
+                    "situacao": col.get("situacao"),
+                    "coletados": col.get("coletados"),
+                    "unidades": col.get("unidades"),
+                    "esperados": col.get("esperados"),
+                    "vendas": self._contar("im_vendas", {"coleta_id": f"eq.{coleta_id}"}),
+                    "removidas": self._contar("im_unidades", {"removida_coleta_id": f"eq.{coleta_id}"}),
+                    "aguardado": True,
+                }
+            if self._relogio() >= limite:
+                raise ColetaErro(
+                    f"im_fechar_coleta sem resposta ({motivo}) e a coleta {coleta_id} "
+                    f"continua 'rodando' depois de {FECHAR_ESPERA_S:.0f} s"
+                ) from None
+            self._sleep(FECHAR_INTERVALO_S)
+
+    def _contar(self, tabela: str, filtro: dict) -> int | None:
+        try:
+            r = self.http.get(
+                f"{self.url}/rest/v1/{tabela}",
+                headers={**self._cabecalhos(), "Prefer": "count=exact", "Range": "0-0"},
+                params={"select": "id", **filtro},
+            )
+            fim = r.headers.get("content-range", "").rsplit("/", 1)[-1]
+            return int(fim) if r.status_code < 400 and fim.isdigit() else None
+        except httpx.HTTPError:
+            return None
 
     def anotar_falha(self, coleta_id: str, id_externo: str | None, motivo: str, detalhe: str) -> None:
         self._rpc("im_anotar_falha", {
