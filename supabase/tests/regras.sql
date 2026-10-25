@@ -458,5 +458,8 @@ select pg_temp.ok(not exists (select 1 from pg_class where relname = '_im_fc_alu
 select pg_temp.ok((select count(*) = 2 from regexp_matches(
     pg_get_functiondef('public.im_fechar_coleta(uuid,int,boolean)'::regprocedure), 'analyze pg_temp\._im_fc_alu', 'g')),
   'fechamento analisa a tabela de trabalho (sem isso o plano vira laço aninhado)');
+select pg_temp.ok((select 'statement_timeout=10min' = any(proconfig) from pg_proc
+   where oid = 'public.im_fechar_coleta(uuid,int,boolean)'::regprocedure),
+  'fechamento tem statement_timeout próprio de 10 min (a API corta em 8 s)');
 
 \echo 'TODOS OS TESTES PASSARAM'
