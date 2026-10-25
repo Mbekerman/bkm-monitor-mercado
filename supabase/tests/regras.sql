@@ -1,0 +1,363 @@
+-- Regras do monitor de mercado, do zero, sem o schema app.
+-- Roda como postgres (dono) para a carga e troca de papel para provar o RLS.
+\set ON_ERROR_STOP on
+\set QUIET on
+set client_min_messages = warning;
+
+create function pg_temp.ok(cond boolean, msg text) returns void language plpgsql as $$
+begin if not coalesce(cond,false) then raise exception 'FALHOU: %', msg; end if; raise notice 'ok  %', msg; end $$;
+create function pg_temp.falha(sqlcmd text, msg text) returns void language plpgsql as $$
+begin
+  begin execute sqlcmd; exception when others then raise notice 'ok  % (%)', msg, sqlerrm; return; end;
+  raise exception 'FALHOU: esperava erro em %', msg;
+end $$;
+create function pg_temp.uj(p_num text, p_area numeric, p_preco numeric, p_sit text default 'disponivel',
+  p_dorm int default 2, p_vaga int default 1, p_andar int default 1, p_tipo text default 'apartamento',
+  p_torre text default 'A', p_id text default null) returns jsonb language sql immutable as $$
+  select jsonb_strip_nulls(jsonb_build_object(
+    'id_externo', p_id, 'torre', p_torre, 'numero', p_num, 'area_privativa_m2', p_area, 'preco', p_preco,
+    'situacao', p_sit, 'dormitorios', p_dorm, 'vagas', p_vaga, 'andar', p_andar, 'tipo_unidade', p_tipo)) $$;
+create function pg_temp.ej(p_id text, p_nome text, p_uns jsonb, p_tipo text default 'vertical',
+  p_fin text default 'residencial', p_sit text default 'em_obras', p_lanc date default null, p_ent date default null,
+  p_cidade text default 'São Paulo', p_uf text default 'SP', p_lat float8 default -23.55, p_lng float8 default -46.63)
+  returns jsonb language sql stable as $$
+  select jsonb_strip_nulls(jsonb_build_object(
+    'id_externo', p_id, 'nome', p_nome,
+    'incorporadora', jsonb_build_object('id_externo','inc-monitor','nome','Incorporadora Monitor','cnpj','12345678000199'),
+    'tipo', p_tipo, 'finalidade', p_fin, 'situacao', p_sit, 'data_lancamento', p_lanc, 'previsao_entrega', p_ent,
+    'latitude', p_lat, 'longitude', p_lng, 'municipio', p_cidade, 'uf', p_uf, 'bairro', 'Moema',
+    'unidades_informadas', case when p_uns is null then null else jsonb_array_length(p_uns) end,
+    'estoque_informado', case when p_uns is null then null else jsonb_array_length(p_uns) end,
+    'unidades', p_uns)) $$;
+set client_min_messages = notice;
+
+-- ---------------------------------------------------------------------
+\echo '# forma do banco'
+select id as sp from public.im_municipios where codigo_ibge = '3550308' \gset
+select id as sjc from public.im_municipios where codigo_ibge = '3549904' \gset
+select pg_temp.ok(not exists (select 1 from pg_namespace where nspname = 'app'), 'não cria o schema app');
+select pg_temp.ok(not exists (select 1 from pg_extension where extname in ('postgis','pg_trgm')), 'não instala postgis nem pg_trgm');
+select pg_temp.ok(not exists (
+  select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+   where n.nspname = 'public' and c.relkind = 'v' and c.relname like 'im_%'), 'não cria vista');
+select pg_temp.ok(not exists (
+  select 1 from pg_trigger t
+  join pg_class c on c.oid = t.tgrelid
+  join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'auth' and c.relname = 'users' and not t.tgisinternal), 'não cria trigger em auth.users');
+select pg_temp.ok((select count(*) = 12 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relkind = 'r' and c.relname like 'im_%'), 'doze tabelas im_');
+select pg_temp.ok((select public = false from storage.buckets where id = 'im-bruto'), 'bucket im-bruto é privado');
+select pg_temp.ok(not exists (
+  select 1 from pg_policy pol
+  where pol.polname like 'im_bruto%'
+    and exists (
+      select 1 from pg_roles r
+      where r.oid = any(pol.polroles) and r.rolname in ('anon','authenticated'))),
+  'política do bruto não abre para anon nem authenticated');
+select pg_temp.ok(
+  has_table_privilege('authenticated', 'public.im_unidades', 'select')
+  and not has_table_privilege('authenticated', 'public.im_unidades', 'insert')
+  and not has_table_privilege('authenticated', 'public.im_unidades', 'update')
+  and not has_table_privilege('authenticated', 'public.im_unidades', 'delete')
+  and not has_table_privilege('anon', 'public.im_unidades', 'select')
+  and has_function_privilege('service_role', 'public.im_importar(uuid, jsonb)', 'execute')
+  and not has_function_privilege('authenticated', 'public.im_importar(uuid, jsonb)', 'execute')
+  and not has_function_privilege('anon', 'public.im_abrir_coleta(text, text, date, integer, text)', 'execute')
+  and not has_function_privilege('service_role', 'public._im_importar_um(uuid, jsonb)', 'execute'),
+  'grants: select para authenticated, escrita da função só para service_role, interna fechada');
+
+select pg_temp.ok((select count(*) = 10 and bool_and((codigo in ('apartamento','studio','cobertura','garden','duplex')) = residencial)
+  from public.im_tipos_unidade), 'tipos de unidade nascem com a config');
+select pg_temp.ok((select meses_lancamento = 6 and dias_preco_lancamento = 60 and meses_recem_entregue = 24
+  and nr_conta_como_residencial and :'sp' = any(municipios) and :'sjc' = any(municipios)
+  from public.im_config), 'config nasce com os prazos, São Paulo e São José dos Campos');
+select pg_temp.ok(public.im_municipio_por_nome('sao paulo', 'SP') = :'sp'
+  and public.im_municipio_por_nome('São José dos Campos', 'sp') = :'sjc'
+  and public.im_municipio_por_nome('São Paulo', 'RJ') is null
+  and public.im_municipio_por_nome('Campinas', 'SP') is null, 'município por nome, sem acento; cidade de fora não entra');
+select pg_temp.ok(public.im_norm_rotulo('Torre A') = 'A' and public.im_norm_rotulo('Bloco A') = 'A'
+  and public.im_norm_rotulo('Edifício B') = 'B', 'rótulo tira torre, bloco e edifício');
+select pg_temp.ok(public.im_distancia_m(-23.55, -46.63, -23.55, -46.63) = 0, 'haversine no mesmo ponto é zero');
+
+set role authenticated;
+select pg_temp.falha($$insert into public.im_unidades (empreendimento_id, primeira_coleta_id) values ('00000000-0000-0000-0000-0000000000aa', '00000000-0000-0000-0000-0000000000bb')$$, 'authenticated não insere unidade');
+select pg_temp.falha($$select public.im_abrir_coleta('orulo_api', 'completa_mensal', '2026-01-01')$$, 'authenticated não abre coleta');
+select pg_temp.falha($$select public.im_salvar_config('{"meses_lancamento":9}')$$, 'authenticated não muda a config');
+set role anon;
+select pg_temp.falha('select count(*) from public.im_coletas', 'anon não lê a coleta');
+set role postgres;
+select pg_temp.falha($$select public.im_abrir_coleta('planilha', 'completa_mensal', '2026-01-01')$$, 'fonte desconhecida é recusada');
+
+-- ---------------------------------------------------------------------
+\echo '# coleta, venda e cobertura'
+select public.im_abrir_coleta('orulo_api', 'completa_mensal', '2026-02-01') as c_fev \gset
+select pg_temp.ok((select bruto_caminho = 'mercado/2026-02-01-completa_mensal.json.gz' from public.im_coletas where id = :'c_fev'), 'caminho do bruto leva referência e tipo, sem empresa');
+select pg_temp.ok((public.im_importar(:'c_fev', jsonb_build_array(pg_temp.ej('vso-velho', 'Estoque Velho',
+  (select jsonb_agg(pg_temp.uj(i::text, 45, 450000, 'disponivel', 2, 1, 1, 'apartamento', 'A', 'v' || i)) from generate_series(1, 10) i),
+  'vertical', 'residencial', 'em_obras', '2026-01-15')))->>'erros')::int = 0, 'fevereiro importa o estoque');
+select pg_temp.ok((public.im_fechar_coleta(:'c_fev')->>'situacao') = 'completa', 'primeira mensal sem anterior fecha completa');
+select public.im_abrir_coleta('orulo_api', 'completa_mensal', '2026-03-01') as c_mar \gset
+select pg_temp.ok((public.im_importar(:'c_mar', jsonb_build_array(
+  pg_temp.ej('vso-velho', 'Estoque Velho',
+    (select jsonb_agg(pg_temp.uj(i::text, 45, 450000, case when i <= 2 then 'vendida' else 'disponivel' end, 2, 1, 1, 'apartamento', 'A', 'v' || i)) from generate_series(1, 10) i),
+    'vertical', 'residencial', 'em_obras', '2026-01-15'),
+  pg_temp.ej('vso-novo', 'Lancamento Marco',
+    (select jsonb_agg(pg_temp.uj(i::text, 38, 380000, 'disponivel', 1, 1, 2, 'apartamento', 'B', 'l' || i)) from generate_series(1, 4) i),
+    'vertical', 'residencial', 'lancamento', '2026-03-10')))->>'erros')::int = 0, 'março importa a venda e o lançamento');
+select pg_temp.ok((public.im_fechar_coleta(:'c_mar')->>'vendas')::int = 2, 'duas vendas no fechamento de março');
+select pg_temp.ok((select count(*) = 2 and bool_and(not antes_do_monitor and origem_preco = 'ultimo_visto' and preco = 450000
+  and vendida_de = '2026-02-01' and vendida_ate = '2026-03-01')
+  from public.im_vendas v
+  join public.im_unidades u on u.id = v.unidade_id
+  join public.im_ids_externos x on x.entidade = 'empreendimento' and x.entidade_id = u.empreendimento_id and x.id_externo = 'vso-velho'),
+  'as duas vendas de março ficam gravadas na tabela');
+
+select public.im_salvar_config('{"cobertura_minima_pct": 1}');
+
+select public.im_abrir_coleta('orulo_planilha', 'completa_mensal', '2026-08-01') as c_ago \gset
+select pg_temp.ok((public.im_importar(:'c_ago', jsonb_build_array(pg_temp.ej('sumiu', 'Some Uma', jsonb_build_array(
+  pg_temp.uj('1', 42, 420000, 'disponivel', 2, 1, 1, 'apartamento', 'A', 'sa'),
+  pg_temp.uj('2', 42, 420000, 'disponivel', 2, 1, 1, 'apartamento', 'A', 'sb')))))->>'erros')::int = 0, 'agosto grava as duas unidades');
+select pg_temp.ok((public.im_fechar_coleta(:'c_ago')->>'situacao') = 'completa', 'agosto fecha completo');
+select public.im_salvar_config('{"cobertura_minima_pct": 90}');
+select public.im_abrir_coleta('orulo_planilha', 'completa_mensal', '2026-09-01') as c_set \gset
+select pg_temp.ok((public.im_importar(:'c_set', jsonb_build_array(pg_temp.ej('sumiu', 'Some Uma', jsonb_build_array(
+  pg_temp.uj('1', 42, null, 'vendida', 2, 1, 1, 'apartamento', 'A', 'sa')))))->>'erros')::int = 0, 'setembro manda só a unidade vendida');
+select pg_temp.ok((public.im_fechar_coleta(:'c_set', 100)->>'situacao') = 'incompleta', 'cobertura baixa deixa a mensal incompleta');
+select pg_temp.ok((select count(*) = 0 from public.im_vendas v join public.im_unidades u on u.id = v.unidade_id
+  join public.im_ids_externos x on x.entidade_id = u.empreendimento_id and x.id_externo = 'sumiu'), 'incompleta não gera venda');
+select pg_temp.ok((select u.removida_coleta_id is null from public.im_unidades u where u.id in (
+  select entidade_id from public.im_ids_externos where id_externo = 'sb')), 'incompleta não marca remoção');
+select public.im_salvar_config('{"cobertura_minima_pct": 1}');
+select public.im_abrir_coleta('orulo_planilha', 'completa_mensal', '2026-09-15') as c_pon \gset
+select pg_temp.ok((public.im_importar(:'c_pon', jsonb_build_array(pg_temp.ej('ponte', 'Ponte', jsonb_build_array(
+  pg_temp.uj('1', 40, 400000)))))->>'erros')::int = 0 and (public.im_fechar_coleta(:'c_pon')->>'situacao') = 'completa',
+  'uma mensal completa de outro empreendimento entra no meio');
+select public.im_abrir_coleta('orulo_planilha', 'completa_mensal', '2026-10-01') as c_out \gset
+select pg_temp.ok((public.im_importar(:'c_out', jsonb_build_array(pg_temp.ej('sumiu', 'Some Uma', jsonb_build_array(
+  pg_temp.uj('1', 42, null, 'vendida', 2, 1, 1, 'apartamento', 'A', 'sa')))))->>'erros')::int = 0, 'outubro confirma a vendida');
+select pg_temp.ok((public.im_fechar_coleta(:'c_out')->>'situacao') = 'completa', 'outubro fecha completo');
+select pg_temp.ok((select count(*) = 1 and bool_and(not v.antes_do_monitor and v.origem_preco = 'ultimo_visto' and v.preco = 420000
+  and v.vendida_de = '2026-08-01' and v.vendida_ate = '2026-10-01' and v.desfeita_coleta_id is null)
+  from public.im_vendas v join public.im_unidades u on u.id = v.unidade_id
+  join public.im_ids_externos x on x.entidade = 'unidade' and x.entidade_id = u.id and x.id_externo = 'sa'),
+  'a passagem sobrevive à incompleta e à mensal do meio');
+select pg_temp.ok((select removida_coleta_id = :'c_out' from public.im_unidades u
+  join public.im_ids_externos x on x.entidade = 'unidade' and x.entidade_id = u.id and x.id_externo = 'sb'), 'a que sumiu na mensal completa é removida');
+
+-- ---------------------------------------------------------------------
+\echo '# filtro, tipo, sugestão e coleta repetida'
+insert into public.im_incorporadoras (nome) values ('Incorporadora Manual') returning id as inc_manual \gset
+insert into public.im_empreendimentos (incorporadora_id, nome, latitude, longitude, situacao, observacao, origem, municipio_id)
+  values (:'inc_manual', 'Residencial Aurora', -23.61, -46.66, 'lancamento', 'não mexer', 'manual', :'sp') returning id as aurora_manual \gset
+select public.im_abrir_coleta('manual', 'completa_mensal', '2026-04-01') as c_man \gset
+create temp table carga_manual (dados jsonb);
+insert into carga_manual values (jsonb_build_array(
+  pg_temp.ej('h', 'Horizontal', jsonb_build_array(pg_temp.uj('1', 40, 400000)), 'horizontal'),
+  pg_temp.ej('s', 'Sobrado', jsonb_build_array(pg_temp.uj('1', 40, 400000)), 'sobrado'),
+  pg_temp.ej('l', 'Loteamento', jsonb_build_array(pg_temp.uj('1', 40, 400000)), 'loteamento'),
+  pg_temp.ej('i', 'Industrial', jsonb_build_array(pg_temp.uj('1', 40, 400000)), 'industrial'),
+  pg_temp.ej('g', 'Galpao', jsonb_build_array(pg_temp.uj('1', 40, 400000)), 'galpao'),
+  pg_temp.ej('u', 'Avulsa', jsonb_build_array(pg_temp.uj('1', 40, 400000)), 'unidade_avulsa'),
+  pg_temp.ej('c', 'Comercial', jsonb_build_array(pg_temp.uj('1', 40, 400000)), 'vertical', 'comercial'),
+  pg_temp.ej('us', 'Usado', jsonb_build_array(pg_temp.uj('1', 40, 400000)), 'vertical', 'residencial', 'usado'),
+  pg_temp.ej('pv', 'Pronto velho', jsonb_build_array(pg_temp.uj('1', 40, 400000)), 'vertical', 'residencial', 'pronto', '2019-01-01', '2020-01-01'),
+  pg_temp.ej('cp', 'Campinas', jsonb_build_array(pg_temp.uj('1', 40, 400000)), 'vertical', 'residencial', 'em_obras', null, null, 'Campinas', 'SP'),
+  pg_temp.ej('sl', 'So loja', jsonb_build_array(pg_temp.uj('1', 30, 300000, 'disponivel', 0, 0, 0, 'loja')), 'vertical', 'misto'),
+  pg_temp.ej('vz', 'Sem unidade', null),
+  pg_temp.ej('misto-1', 'Misto Centro', jsonb_build_array(
+    pg_temp.uj('1', 40, 400000, 'disponivel', 2, 1, 1, 'apartamento', 'A', 'ma1'),
+    pg_temp.uj('2', 40, 400000, 'disponivel', 2, 1, 2, 'apartamento', 'A', 'ma2'),
+    pg_temp.uj('3', 28, 280000, 'disponivel', 0, 0, 0, 'loja', 'A', 'ml'),
+    pg_temp.uj('4', 27, 270000, 'disponivel', 0, 1, 1, 'Studio - NR', 'A', 'ms'),
+    pg_temp.uj('5', 20, 200000, 'disponivel', 0, 0, 1, 'box', 'A', 'mb')), 'vertical', 'misto'),
+  pg_temp.ej('sent', 'Sentinela', jsonb_build_array(pg_temp.uj('1', 40, 0.1)), 'vertical', 'residencial', 'lancamento', '2026-04-01'),
+  pg_temp.ej('aurora-imp', 'Residencial Aurora', jsonb_build_array(pg_temp.uj('1', 40, 400000)), 'vertical', 'residencial', 'lancamento', '2025-01-01', null, 'São Paulo', 'SP', -23.61, -46.66)
+));
+select (public.im_importar(:'c_man', dados)->>'ignorados')::int = 12 and (public.im_importar(:'c_man', dados)->>'erros')::int = 0
+  as imp_ok from carga_manual \gset
+select pg_temp.ok(:'imp_ok', 'fora do filtro não entra; o resto importa');
+select pg_temp.ok((select count(*) = 12 from jsonb_array_elements((select falhas from public.im_coletas where id = :'c_man')) f where f->>'motivo' = 'fora_do_filtro'), 'os doze rejeitados ficam no relatório');
+select pg_temp.ok((public.im_fechar_coleta(:'c_man')->>'situacao') = 'completa', 'coleta manual fecha');
+select (select count(*) from public.im_unidades) as un_antes \gset
+select (select count(*) from public.im_empreendimentos where origem = 'importado') as emp_antes \gset
+select public.im_abrir_coleta('manual', 'completa_mensal', '2026-04-01') as c_man2 \gset
+select pg_temp.ok(:'c_man2' = :'c_man', 'a mesma chave reabre a coleta e desfaz a anterior');
+select pg_temp.ok((public.im_importar(:'c_man', (select dados from carga_manual))->>'erros')::int = 0, 'reimportar a mesma carga não dá erro');
+select pg_temp.ok((public.im_fechar_coleta(:'c_man')->>'situacao') = 'completa', 'a coleta reaberta fecha de novo');
+select pg_temp.ok((select count(*) = :un_antes from public.im_unidades)
+  and (select count(*) = :emp_antes from public.im_empreendimentos where origem = 'importado'), 'rodar de novo não duplica unidade nem empreendimento');
+select e.id as emisto from public.im_empreendimentos e join public.im_ids_externos x on x.entidade_id = e.id and x.id_externo = 'misto-1' \gset
+select pg_temp.ok((select count(*) = 5 from public.im_unidades where empreendimento_id = :'emisto'), 'loja e tipo desconhecido são gravados');
+select pg_temp.ok((select not residencial and tipo_unidade = 'loja' from public.im_unidades where empreendimento_id = :'emisto' and numero = '3'), 'loja fica de fora do residencial');
+select pg_temp.ok((select tipo_unidade = 'nao_informado' and not residencial and tipo_fonte = 'box' from public.im_unidades where empreendimento_id = :'emisto' and numero = '5'), 'tipo desconhecido vira não informado');
+select pg_temp.ok((select tipos_desconhecidos = array['box'] from public.im_coletas where id = :'c_man'), 'o tipo desconhecido entra no relatório da coleta');
+select pg_temp.ok((select count(*) filter (where residencial) = 3 from public.im_unidades where empreendimento_id = :'emisto'), 'no misto só apartamento e studio NR ficam residenciais');
+select pg_temp.ok((select residencial from public.im_unidades where empreendimento_id = :'emisto' and numero = '4'), 'studio NR conta como residencial');
+select public.im_salvar_config('{"nr_conta_como_residencial": false}');
+select pg_temp.ok((select not residencial from public.im_unidades where empreendimento_id = :'emisto' and numero = '4'), 'desligar o NR tira o studio do residencial');
+select public.im_salvar_config('{"nr_conta_como_residencial": true}');
+select pg_temp.ok((select residencial from public.im_unidades where empreendimento_id = :'emisto' and numero = '4'), 'ligar o NR devolve o studio');
+select pg_temp.ok((select s.preco is null and 'preco_sentinela' = any(s.marcas) from public.im_unidade_estados s
+  join public.im_unidades u on u.id = s.unidade_id
+  join public.im_ids_externos x on x.entidade_id = u.empreendimento_id and x.id_externo = 'sent'), 'preço 0,1 é sentinela e não entra como preço');
+select pg_temp.ok((select observacao = 'não mexer' and origem = 'manual' from public.im_empreendimentos where id = :'aurora_manual'), 'o empreendimento manual não é alterado');
+select pg_temp.ok((select count(*) = 1 and min(similaridade) >= 0.5 and min(distancia_m) = 0 from public.im_sugestoes_vinculo where manual_id = :'aurora_manual'), 'nome igual e perto vira sugestão, sem vínculo automático');
+
+-- ---------------------------------------------------------------------
+\echo '# venda anterior, distrato, lançamento e vínculo'
+select public.im_abrir_coleta('orulo_login', 'completa_mensal', '2026-07-01') as c_ljul \gset
+select pg_temp.ok(:'c_ljul' is not null, 'a fonte orulo_login abre coleta');
+select pg_temp.ok((public.im_importar(:'c_ljul', jsonb_build_array(
+  pg_temp.ej('venda-1', 'Venda Um', jsonb_build_array(
+    pg_temp.uj('1', 40, 400000, 'disponivel', 2, 1, 1, 'apartamento', 'A', 'a1'),
+    pg_temp.uj('2', 40, 400000, 'disponivel', 2, 1, 1, 'apartamento', 'A', 'a2'),
+    pg_temp.uj('3', 50, 900000, 'disponivel', 2, 1, 1, 'apartamento', 'A', 'a3'),
+    pg_temp.uj('4', 41, null, 'vendida', 2, 1, 1, 'apartamento', 'A', 's1'),
+    pg_temp.uj('5', 30, 300000, 'disponivel', 0, 0, 0, 'loja', 'A', 'lj'),
+    pg_temp.uj('101', 36, 300000, 'disponivel', 2, 1, 2, 'apartamento', 'Torre A', null)),
+    'vertical', 'residencial', 'em_obras', '2026-01-01'),
+  pg_temp.ej('preco-lanc', 'Preco de lancamento', jsonb_build_array(
+    pg_temp.uj('1', 40, 410000, 'disponivel', 2, 1, 1, 'apartamento', 'A', 'p1')),
+    'vertical', 'residencial', 'lancamento', '2026-06-01'),
+  pg_temp.ej('so-lanc', 'So lancamentos', jsonb_build_array(
+    pg_temp.uj('1', 40, 400000, 'disponivel', 2, 1, 1, 'apartamento', 'A', 'sl1'),
+    pg_temp.uj('2', 40, 400000, 'disponivel', 2, 1, 1, 'apartamento', 'A', 'sl2')))
+))->>'erros')::int = 0, 'julho do login importa venda, lançamento e loja');
+select pg_temp.ok((public.im_fechar_coleta(:'c_ljul')->>'situacao') = 'completa', 'julho do login fecha');
+select pg_temp.ok((select v.antes_do_monitor and v.origem_preco = 'estimado' and v.preco = 410000 and v.vendida_de = '2026-07-01' and v.vendida_ate = '2026-07-01'
+  from public.im_vendas v join public.im_unidades u on u.id = v.unidade_id
+  join public.im_ids_externos x on x.entidade = 'unidade' and x.entidade_id = u.id and x.id_externo = 's1'),
+  'venda anterior ao monitor usa a mediana dos pares a até 3%');
+select pg_temp.ok((select not exists (select 1 from public.im_vendas v join public.im_unidades u on u.id = v.unidade_id
+  join public.im_ids_externos x on x.entidade = 'unidade' and x.entidade_id = u.id and x.id_externo = 'lj')), 'loja vendida ou não, não vira venda');
+select pg_temp.ok((select preco_de_lancamento from public.im_unidades u
+  join public.im_ids_externos x on x.entidade = 'unidade' and x.entidade_id = u.id and x.id_externo = 'p1'), 'preço visto a até 60 dias do lançamento é preço de lançamento');
+select public.im_abrir_coleta('orulo_login', 'lancamentos', '2026-07-20') as c_lanc \gset
+select pg_temp.ok((public.im_importar(:'c_lanc', jsonb_build_array(pg_temp.ej('so-lanc', 'So lancamentos', jsonb_build_array(
+  pg_temp.uj('1', 40, 400000, 'vendida', 2, 1, 1, 'apartamento', 'A', 'sl1')))))->>'erros')::int = 0, 'coleta de lançamentos atualiza quem veio');
+select pg_temp.ok((public.im_fechar_coleta(:'c_lanc')->>'vendas')::int = 0, 'coleta de lançamentos não gera venda no fechamento');
+select pg_temp.falha(format($$select public.im_fechar_coleta(%L)$$, :'c_lanc'), 'coleta fechada não fecha de novo');
+select pg_temp.ok((select removida_coleta_id is null from public.im_unidades u
+  join public.im_ids_externos x on x.entidade = 'unidade' and x.entidade_id = u.id and x.id_externo = 'sl2'), 'coleta de lançamentos não remove quem faltou');
+select pg_temp.ok((select count(*) = 0 from public.im_vendas v join public.im_unidades u on u.id = v.unidade_id
+  join public.im_ids_externos x on x.entidade = 'unidade' and x.entidade_id = u.id and x.id_externo = 'sl1'), 'coleta de lançamentos não gera venda');
+
+select public.im_abrir_coleta('orulo_login', 'completa_mensal', '2026-08-01') as c_lago \gset
+select pg_temp.ok((public.im_importar(:'c_lago', jsonb_build_array(
+  pg_temp.ej('venda-1', 'Venda Um', jsonb_build_array(
+    pg_temp.uj('1', 40, null, 'vendida', 2, 1, 1, 'apartamento', 'A', 'a1'),
+    pg_temp.uj('2', 40, 400000, 'disponivel', 2, 1, 1, 'apartamento', 'A', 'a2'),
+    pg_temp.uj('3', 50, 900000, 'disponivel', 2, 1, 1, 'apartamento', 'A', 'a3'),
+    pg_temp.uj('4', 41, null, 'vendida', 2, 1, 1, 'apartamento', 'A', 's1'),
+    pg_temp.uj('5', 30, 300000, 'vendida', 0, 0, 0, 'loja', 'A', 'lj'),
+    pg_temp.uj('101', 36, 300000, 'disponivel', 2, 1, 2, 'apartamento', 'Bloco A', null)),
+    'vertical', 'residencial', 'em_obras', '2026-01-01'),
+  pg_temp.ej('preco-lanc', 'Preco de lancamento', jsonb_build_array(
+    pg_temp.uj('1', 40, 410000, 'disponivel', 2, 1, 1, 'apartamento', 'A', 'p1')),
+    'vertical', 'residencial', 'lancamento', '2026-06-01')
+))->>'erros')::int = 0, 'agosto marca a venda e normaliza o bloco');
+select pg_temp.ok((public.im_fechar_coleta(:'c_lago')->>'situacao') = 'completa', 'agosto do login fecha');
+select pg_temp.ok((select count(*) = 1 from public.im_unidades u
+  join public.im_empreendimentos e on e.id = u.empreendimento_id
+  join public.im_ids_externos x on x.entidade_id = e.id and x.id_externo = 'venda-1'
+  where u.numero_norm = '101'), 'Torre A e Bloco A são a mesma unidade');
+select pg_temp.ok((select count(*) = 1 and bool_and(not antes_do_monitor and origem_preco = 'ultimo_visto' and preco = 400000
+  and vendida_de = '2026-07-01' and vendida_ate = '2026-08-01')
+  from public.im_vendas v join public.im_unidades u on u.id = v.unidade_id
+  join public.im_ids_externos x on x.entidade = 'unidade' and x.entidade_id = u.id and x.id_externo = 'a1'),
+  'disponível que vira vendida gera venda com o último preço');
+select pg_temp.ok((select count(*) = 0 from public.im_vendas v join public.im_unidades u on u.id = v.unidade_id
+  join public.im_ids_externos x on x.entidade = 'unidade' and x.entidade_id = u.id and x.id_externo = 'lj'), 'loja que passa a vendida continua fora das vendas');
+select public.im_abrir_coleta('orulo_login', 'completa_mensal', '2026-09-01') as c_lset \gset
+select pg_temp.ok((public.im_importar(:'c_lset', jsonb_build_array(
+  pg_temp.ej('venda-1', 'Venda Um', jsonb_build_array(
+    pg_temp.uj('1', 40, 410000, 'disponivel', 2, 1, 1, 'apartamento', 'A', 'a1'),
+    pg_temp.uj('2', 40, 400000, 'disponivel', 2, 1, 1, 'apartamento', 'A', 'a2'),
+    pg_temp.uj('3', 50, 900000, 'disponivel', 2, 1, 1, 'apartamento', 'A', 'a3'),
+    pg_temp.uj('4', 41, null, 'vendida', 2, 1, 1, 'apartamento', 'A', 's1'),
+    pg_temp.uj('5', 30, 300000, 'vendida', 0, 0, 0, 'loja', 'A', 'lj'),
+    pg_temp.uj('101', 36, 300000, 'disponivel', 2, 1, 2, 'apartamento', 'Bloco A', null)),
+    'vertical', 'residencial', 'em_obras', '2026-01-01'),
+  pg_temp.ej('preco-lanc', 'Preco de lancamento', jsonb_build_array(
+    pg_temp.uj('1', 40, 410000, 'disponivel', 2, 1, 1, 'apartamento', 'A', 'p1'),
+    pg_temp.uj('2', 40, 420000, 'disponivel', 2, 1, 2, 'apartamento', 'A', 'p2')),
+    'vertical', 'residencial', 'lancamento', '2026-06-01')
+))->>'erros')::int = 0, 'setembro desfaz a venda e traz unidade fora da janela');
+select pg_temp.ok((public.im_fechar_coleta(:'c_lset')->>'situacao') = 'completa', 'setembro do login fecha');
+select pg_temp.ok((select desfeita_coleta_id = :'c_lset' from public.im_vendas v
+  join public.im_unidades u on u.id = v.unidade_id
+  join public.im_ids_externos x on x.entidade = 'unidade' and x.entidade_id = u.id and x.id_externo = 'a1'), 'voltar a disponível desfaz a venda');
+select pg_temp.ok((select not preco_de_lancamento from public.im_unidades u
+  join public.im_ids_externos x on x.entidade = 'unidade' and x.entidade_id = u.id and x.id_externo = 'p2'), 'preço visto depois de 60 dias não é de lançamento');
+
+select public.im_abrir_coleta('orulo_login', 'completa_mensal', '2026-10-01') as c_v1 \gset
+select pg_temp.ok((public.im_importar(:'c_v1', jsonb_build_array(
+  pg_temp.ej('liga', 'Liga', jsonb_build_array(pg_temp.uj('101', 40, 400000, 'disponivel', 2, 1, 5, 'apartamento', 'A', 'old-u'))),
+  pg_temp.ej('liga-nao', 'Liga Nao', jsonb_build_array(pg_temp.uj('201', 44, 440000, 'disponivel', 2, 1, 4, 'apartamento', 'A', 'old-n')))
+))->>'erros')::int = 0 and (public.im_fechar_coleta(:'c_v1')->>'situacao') = 'completa', 'outubro grava as unidades que vão trocar de número');
+select public.im_abrir_coleta('orulo_login', 'completa_mensal', '2026-10-20') as c_v2 \gset
+select pg_temp.ok((public.im_importar(:'c_v2', jsonb_build_array(
+  pg_temp.ej('liga', 'Liga', jsonb_build_array(pg_temp.uj('101A', 40, 400000, 'vendida', 2, 1, 5, 'apartamento', 'A', 'new-u'))),
+  pg_temp.ej('liga-nao', 'Liga Nao', jsonb_build_array(pg_temp.uj('201B', 44, 440000, 'disponivel', 2, 1, 4, 'apartamento', 'A', 'new-n')))
+))->>'erros')::int = 0, 'a unidade nova chega com a mesma área, andar e preço');
+select pg_temp.ok((public.im_fechar_coleta(:'c_v2')->>'situacao') = 'completa', 'o par fica pendente no fechamento');
+select u.id as unew from public.im_unidades u join public.im_ids_externos x on x.entidade = 'unidade' and x.entidade_id = u.id and x.id_externo = 'new-u' \gset
+select u.id as unewn from public.im_unidades u join public.im_ids_externos x on x.entidade = 'unidade' and x.entidade_id = u.id and x.id_externo = 'new-n' \gset
+select pg_temp.ok((select vinculo_pendente_id is not null from public.im_unidades where id = :'unew')
+  and (select removida_coleta_id is null from public.im_unidades u join public.im_ids_externos x on x.entidade_id = u.id and x.id_externo = 'old-u'),
+  'par pendente não remove a unidade antiga');
+select public.im_confirmar_vinculo_unidade(:'unew', true);
+select pg_temp.ok(not exists (select 1 from public.im_unidades where id = :'unew')
+  and exists (select 1 from public.im_ids_externos where id_externo = 'new-u' and entidade_id in (select id from public.im_unidades)),
+  'confirmar funde na unidade antiga e leva o id de fora');
+select pg_temp.ok((select count(*) = 1 and bool_and(origem_preco = 'ultimo_visto' and not antes_do_monitor)
+  from public.im_vendas v join public.im_unidades u on u.id = v.unidade_id
+  join public.im_ids_externos x on x.entidade_id = u.id and x.id_externo = 'new-u'), 'o vínculo confirmado gera a venda');
+select public.im_confirmar_vinculo_unidade(:'unewn', false);
+select pg_temp.ok((select vinculo_pendente_id is null from public.im_unidades where id = :'unewn')
+  and (select removida_coleta_id is not null from public.im_unidades u join public.im_ids_externos x on x.entidade_id = u.id and x.id_externo = 'old-n'),
+  'recusar o vínculo remove a antiga e fica com a nova');
+select pg_temp.falha($$select public.im_confirmar_vinculo_unidade('00000000-0000-0000-0000-0000000000aa', true)$$, 'sem vínculo pendente não confirma');
+
+select public.im_abrir_coleta('orulo_login', 'lancamentos', '2026-10-22') as c_sem_lista \gset
+select pg_temp.ok((public.im_importar(:'c_sem_lista', jsonb_build_array(
+  pg_temp.ej('venda-1', 'Venda Um', null),
+  pg_temp.ej('nunca-vi', 'Nunca Vi', null)
+))->>'ignorados')::int = 1, 'lançamentos sem unidades atualiza quem já passou e ignora o novo');
+select pg_temp.ok((select e.ultima_coleta_id = :'c_sem_lista' and s.no_filtro and s.situacao = 'em_obras'
+  from public.im_empreendimentos e
+  join public.im_ids_externos x on x.entidade_id = e.id and x.id_externo = 'venda-1'
+  join public.im_empreendimento_estados s on s.empreendimento_id = e.id and s.ate_coleta_id is null),
+  'lançamentos sem lista mantém o empreendimento no filtro');
+select pg_temp.ok((public.im_fechar_coleta(:'c_sem_lista')->>'vendas')::int = 0, 'lançamentos sem lista não vende');
+
+select public.im_abrir_coleta('orulo_api', 'completa_mensal', '2026-11-01') as c_forca \gset
+select pg_temp.ok((public.im_fechar_coleta(:'c_forca', null, true)->>'situacao') = 'incompleta', 'parada na fonte força a coleta incompleta');
+select public.im_abrir_coleta('orulo_api', 'completa_mensal', '2026-11-02') as c_sem_forca \gset
+select pg_temp.ok((public.im_fechar_coleta(:'c_sem_forca')->>'situacao') = 'completa', 'sem esperados e sem parada a mensal nova fecha completa');
+
+select public.im_abrir_coleta('orulo_api', 'lancamentos', '2026-11-03') as c_auth \gset
+select public.im_anotar_falha(:'c_auth', '1', 'http', '500 depois das tentativas');
+select pg_temp.ok((select falhas->0->>'motivo' = 'http' and falhas->0->>'id_externo' = '1'
+  from public.im_coletas where id = :'c_auth'), 'a coleta anota a falha do adaptador');
+select public.im_falhar_coleta(:'c_auth', '401 depois do novo login');
+select pg_temp.ok((select situacao = 'falhou' and concluida_em is not null from public.im_coletas where id = :'c_auth'), 'segundo 401 encerra a coleta como falhou');
+select pg_temp.falha(format($$select public.im_fechar_coleta(%L)$$, :'c_auth'), 'coleta que falhou não fecha');
+
+set role service_role;
+select public.im_abrir_coleta('orulo_planilha', 'lancamentos', '2026-11-04') as c_sr \gset
+select pg_temp.ok(:'c_sr' is not null, 'service_role abre a coleta');
+select public.im_falhar_coleta(:'c_sr', 'encerrar o teste');
+set role authenticated;
+select pg_temp.ok((select count(*) >= 3 from public.im_unidades) and (select count(*) >= 1 from public.im_vendas) and (select count(*) >= 1 from public.im_coletas), 'authenticated lê as tabelas do monitor');
+select pg_temp.falha($$select public.im_falhar_coleta('00000000-0000-0000-0000-0000000000aa', 'x')$$, 'authenticated não marca a coleta como falhou');
+set role postgres;
+
+select pg_temp.ok(not exists (
+  select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+   where n.nspname = 'public' and c.relname in ('empresas','concorrentes','concorrencia_empreendimentos')),
+  'não cria tabela do BKM Terrenos');
+
+\echo 'TODOS OS TESTES PASSARAM'
