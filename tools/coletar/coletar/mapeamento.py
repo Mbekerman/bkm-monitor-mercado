@@ -214,8 +214,11 @@ _NUMERO_COM_ANDAR = re.compile(r"^[1-9]\d{2,3}$")
 # Referência que já nasce negativa: "-1" é o nível, "-101" é a unidade 01 do -1.
 _REF_SUBSOLO = re.compile(r"^-(\d+)$")
 _TOKEN_SS_NUM = re.compile(r"^ss(\d+)$")
-_TOKEN_S_NUM = re.compile(r"^s(\d+)$")
+# S colado no número da unidade marca subsolo: "S1", "S08", "S204", "101S".
+_TOKEN_S_NUM = re.compile(r"^s(\d+)$|^(\d+)s$")
 _TOKENS_SUBSOLO = frozenset({"ss", "sub", "subsolo"})
+# Subsolo mais fundo aceito. Abaixo disto o nível é tratado como implausível.
+ANDAR_MIN = -5
 
 # Texto do empreendimento que diz, com todas as letras, que não há vaga.
 _SEM_VAGA = re.compile(
@@ -244,18 +247,36 @@ def _nivel_referencia_negativa(digitos: str) -> int | None:
     n = int(digitos)
     if n <= 0:
         return None
+    nivel = n // 100 if len(digitos) >= 3 else n
+    return -nivel if 0 < nivel <= -ANDAR_MIN else None
+
+
+def _nivel_s(digitos: str, andar_orulo: int | None) -> int | None:
+    """Nível de uma unidade com S colado no número: "S204" e "204S" são o -2.
+
+    Com 3 ou 4 dígitos o andar sai do número como no positivo (101 -> -1,
+    1104 -> -11). Com 1 dígito ele é o próprio nível (S2 -> -2). Com 2 dígitos
+    ("S08") o número não traz o andar, e vale o floor negativo do Órulo.
+    Nível abaixo de ANDAR_MIN é implausível e fica vazio.
+    """
     if len(digitos) >= 3:
-        nivel = n // 100
-        return -nivel if nivel > 0 else None
-    return -n
+        nivel = -(int(digitos) // 100)
+    elif len(digitos) == 1:
+        nivel = -int(digitos)
+    else:
+        nivel = andar_orulo if andar_orulo is not None and andar_orulo < 0 else None
+    if nivel is None or not ANDAR_MIN <= nivel < 0:
+        return None
+    return nivel
 
 
-def _marca_subsolo(bruto: str | None, *, aceita_menos: bool) -> int | None:
+def _marca_subsolo(bruto: str | None, *, aceita_menos: bool, andar_orulo: int | None = None) -> int | None:
     """Nível abaixo do térreo escrito na referência ou na torre, ou None.
 
-    Vale referência que começa com '-' e o token inteiro S1/S2, SS/SS1,
-    subsolo, sub-solo ou SUB, sem acento e sem distinção de maiúsculas.
-    SS, SUB e subsolo, sem número, são o andar -1.
+    Vale referência que começa com '-', o S colado no número (S1, S08, S204,
+    101S; ver _nivel_s), o token inteiro SS/SS1, subsolo, sub-solo ou SUB, sem
+    acento e sem distinção de maiúsculas. SS, SUB e subsolo, sem número, são o
+    andar -1. S no meio do número ("11S04", "U1S05") não é lido: fica vazio.
     """
     if not bruto:
         return None
@@ -268,11 +289,12 @@ def _marca_subsolo(bruto: str | None, *, aceita_menos: bool) -> int | None:
     for tok in tokens:
         m = _TOKEN_SS_NUM.fullmatch(tok)
         if m and int(m.group(1)) > 0:
-            return -int(m.group(1))
+            nivel = -int(m.group(1))
+            return nivel if nivel >= ANDAR_MIN else None
     for tok in tokens:
         m = _TOKEN_S_NUM.fullmatch(tok)
-        if m and int(m.group(1)) > 0:
-            return -int(m.group(1))
+        if m and int(m.group(1) or m.group(2)) > 0:
+            return _nivel_s(m.group(1) or m.group(2), andar_orulo)
     if any(tok in _TOKENS_SUBSOLO for tok in tokens) or re.search(r"\bsub[\s-]+solo\b", normalizado):
         return -1
     return None
@@ -287,16 +309,17 @@ def andar_unidade(unidade: dict, maximo: int | None) -> int | None:
     se o Órulo não informa). Senão, só se tira o andar do número quando ele é
     inequívoco (3 ou 4 dígitos, sem zero à esquerda) e cabe no prédio.
 
-    Andar negativo só entra com marca de subsolo na referência ou na torre.
-    O `floor` negativo do Órulo vale quando bate com essa marca; senão o nível
-    sai da marca (SS e subsolo sem número viram -1). Sem marca, o negativo
-    fica vazio: 101 com floor -1 é sinal invertido, e não se usa o número.
+    Andar negativo só entra com marca de subsolo na referência ou na torre,
+    e só quando o `floor` do Órulo é negativo (S com floor positivo é studio,
+    "S703" no 7º andar). O nível sai da marca: S colado no número segue o
+    número ("101S" e "S101" são -1, "S204" é -2), SS e subsolo sem número viram
+    -1. Sem marca, o negativo fica vazio: 101 com floor -1 é sinal invertido.
     """
     andar = inteiro(unidade.get("floor"))
     if andar is not None and andar < 0:
-        nivel = _marca_subsolo(texto(unidade.get("reference")), aceita_menos=True)
+        nivel = _marca_subsolo(texto(unidade.get("reference")), aceita_menos=True, andar_orulo=andar)
         if nivel is None:
-            nivel = _marca_subsolo(texto(unidade.get("section")), aceita_menos=False)
+            nivel = _marca_subsolo(texto(unidade.get("section")), aceita_menos=False, andar_orulo=andar)
         if nivel is None:
             return None
         if andar == nivel:
