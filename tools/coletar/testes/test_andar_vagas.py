@@ -59,6 +59,37 @@ def test_andar_subsolo_deriva_da_marca_quando_o_floor_nao_bate():
     assert andar_unidade(_u("12", 3, section="Subsolo"), 10) == 3
 
 
+@pytest.mark.parametrize("ref,floor,maximo,esperado", [
+    ("101S", -1, 9, -1),     # Poente Flor de Maio: S colado no fim
+    ("201S", -1, 9, -2),     # o número manda: 201 é -2
+    ("S204", -2, 1, -2),     # Mitz Vila Sônia - NR
+    ("S114", -1, 1, -1),
+    ("s101", -1, 9, -1),     # minúscula também vale
+    ("S0105", -1, 9, -1),    # 4 dígitos com zero: andar 01
+    ("S08", -1, 9, -1),      # 2 dígitos: o número não traz o andar, vale o floor
+    ("S08", -9, 9, None),    # ...desde que plausível
+    ("S1", -3, 9, -1),       # 1 dígito é o próprio nível
+    ("S1204", -1, 20, None), # -12: fundo demais, vazio
+    ("11S04", -1, 9, None),  # Metrocasa: S no meio do número é ambíguo
+    ("U1S05", -1, 15, None),
+    ("-1201", -1, 20, None),
+])
+def test_andar_s_colado_no_numero(ref, floor, maximo, esperado):
+    assert andar_unidade(_u(ref, floor), maximo) == esperado
+
+
+@pytest.mark.parametrize("ref,floor,section,esperado", [
+    ("S703", 7, None, 7),           # Netcorp Tower - Studios: S de studio, floor positivo
+    ("S2001", 2, None, 2),
+    ("101", -1, "TORRE SUL", None), # S dentro de palavra não é marca
+    ("101", -1, "SALA", None),
+    ("STUDIO101", -1, None, None),
+    ("101", -1, "BLOCO 02", None),
+])
+def test_andar_s_que_nao_e_subsolo(ref, floor, section, esperado):
+    assert andar_unidade(_u(ref, floor, section=section), 20) == esperado
+
+
 def test_andar_vazio_continua_vazio():
     assert andar_unidade(_u("1708", None), 20) is None
 
