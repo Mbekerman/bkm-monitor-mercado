@@ -2,7 +2,7 @@
 
 O coletor fica em `tools/coletar` (Python 3.11+, pacote `coletar`). A regra continua no banco: o comando só busca a fonte, grava o bruto e chama `im_abrir_coleta`, `im_importar` (lotes de até 50 empreendimentos e 400 unidades; empreendimento maior vai em partes, ver abaixo), `im_anotar_falha`, `im_falhar_coleta` e `im_fechar_coleta`. A interface é `FonteMercado`. Os adaptadores são `orulo_login` (completo), `orulo_planilha` (leitor à espera de amostra real) e `orulo_api` (esqueleto OAuth2 da API v2). As tabelas que ele lê são `im_ids_externos` e `im_empreendimento_estados`. O prefixo `im_` é minúsculo e sem aspas. Não há `empresa_id`.
 
-Não há credencial no repositório. Os crons rodam no Railway, nos serviços `coleta-mensal` e `coleta-lancamentos`.
+Não há credencial no repositório. Os crons rodam no Google Cloud Run, nos jobs `coleta-mensal` e `coleta-lancamentos` (ver [cloud-run.md](cloud-run.md)).
 
 ## Comando
 
@@ -48,7 +48,7 @@ O resultado é o mesmo de uma chamada só: venda, unidade removida e vínculo s�
 
 `im_fechar_coleta(coleta, esperados, forcar_incompleta)` faz tudo em comandos de conjunto (antes era um laço por unidade, que levava horas numa carga mensal de ~400 mil unidades): totais, vínculo, venda vista (`ultimo_visto`), venda anterior ao monitor (`estimado`, pela mediana do m² das disponíveis do mesmo empreendimento, dormitórios e vagas, área até 3% diferente), venda desfeita e unidade removida. Mesmo resultado da versão com laço (`testes/test_fechamento_e2e.py`). Numa base desse tamanho passa dos 8 s que a API dá a cada comando (o fechamento de 2026-10 levou cerca de 2 minutos). Por isso `im_fechar_coleta` tem `statement_timeout` próprio de 10 min (migration `fechar_timeout`; os papéis `service_role`, `authenticated` e `anon` ficam como estão), e o coletor espera a resposta por até 11 min. O gateway da API do Supabase corta a requisição HTTP em ~125 s com 504, mas o banco continua até o fim. Quando a resposta se perde (502/503/504, leitura estourada, conexão caída), o coletor não chama `im_falhar_coleta`: lê `im_coletas` a cada 15 s até a coleta sair de `rodando` (até 12 min) e usa a situação e os totais gravados; vendas e removidas vêm de contagens. Se ela continuar `rodando`, sai com 1 e a coleta fica aberta para conferir à mão.
 
-Cobertura: `esperados` é o número de empreendimentos visitados pelo coletor, inclusive os que ficaram fora do filtro. O fechamento desconta os que têm falha `fora_do_filtro` e não entraram nesta coleta (`esperados_no_filtro`). A coleta fica `incompleta` se `coletados` < 90% de `esperados_no_filtro` (`cobertura_minima_pct`) ou < 90% da mensal anterior. O CLI continua mandando os visitados; não há mudança no Railway.
+Cobertura: `esperados` é o número de empreendimentos visitados pelo coletor, inclusive os que ficaram fora do filtro. O fechamento desconta os que têm falha `fora_do_filtro` e não entraram nesta coleta (`esperados_no_filtro`). A coleta fica `incompleta` se `coletados` < 90% de `esperados_no_filtro` (`cobertura_minima_pct`) ou < 90% da mensal anterior. O CLI continua mandando os visitados.
 
 ## Planilha
 
@@ -58,16 +58,16 @@ O mapa padrão está em `COLUNAS` (`tools/coletar/coletar/orulo_planilha.py`): `
 
 Toda rodada desta fonte registra o aviso: o leitor ainda precisa ser validado com uma planilha real do Órulo.
 
-## Cron no Railway
+## Agenda
 
-São dois serviços, os dois com a imagem `tools/coletar/Dockerfile`. O cron do Railway é UTC.
+São dois jobs do Cloud Run, os dois com a imagem `tools/coletar/Dockerfile`, disparados pelo Cloud Scheduler no fuso de São Paulo. Montagem, segredos e teste em [cloud-run.md](cloud-run.md).
 
-| Serviço | Config | Cron (UTC) | Horário em São Paulo | `COLETAR_TIPO` |
-| --- | --- | --- | --- | --- |
-| `coleta-mensal` | `tools/coletar/railway.mensal.json` | `10 3 1 * *` | dia 1 às 00:10 | `mensal` |
-| `coleta-lancamentos` | `tools/coletar/railway.lancamentos.json` | `0 9 * * 1` | segunda às 06:00 | `lancamentos` |
+| Job | Agenda (São Paulo) | Em UTC | `COLETAR_TIPO` |
+| --- | --- | --- | --- |
+| `coleta-mensal` | dia 1 às 00:10 | 03:10 | `mensal` |
+| `coleta-lancamentos` | segunda às 06:00 | 09:00 | `lancamentos` |
 
-No serviço: caminho do config acima, variáveis da tabela (e-mail e senha no mensal e no semanal, mais `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY`). `10 3 1 * *` é 03:10 UTC, 00:10 em São Paulo, no dia 1. `0 9 * * 1` é 09:00 UTC, 06:00 em São Paulo, na segunda. `restartPolicyType` é `NEVER` para o cron não ficar em laço.
+Variáveis da tabela acima: e-mail e senha do Órulo e a chave `service_role` vêm do Secret Manager; `SUPABASE_URL` e `COLETAR_TIPO` são variáveis do job. Sem nova tentativa automática, para a coleta não rodar duas vezes no mesmo dia.
 
 ## Testes
 

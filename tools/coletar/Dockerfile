@@ -1,5 +1,5 @@
-# Imagem do coletor, para os dois serviços cron do projeto Railway deste repo.
-# Não faz deploy sozinho.
+# Imagem do coletor, para os dois jobs do Cloud Run (coleta-mensal e coleta-lancamentos).
+# Montada pelo Cloud Build (tools/coletar/cloudbuild.yaml).
 FROM python:3.12-slim
 WORKDIR /app
 COPY tools/coletar /app

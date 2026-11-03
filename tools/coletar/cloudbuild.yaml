@@ -1,0 +1,25 @@
+# Cloud Build: gatilho no push da main (pasta de trabalho = raiz do repositório).
+# Monta a imagem do coletor e aponta os dois jobs do Cloud Run para ela.
+# Os jobs precisam existir antes (ver docs/cloud-run.md).
+substitutions:
+  _REGIAO: southamerica-east1
+  _IMAGEM: southamerica-east1-docker.pkg.dev/${PROJECT_ID}/monitor-mercado/coletar
+steps:
+  - id: imagem
+    name: gcr.io/cloud-builders/docker
+    args: [build, -f, tools/coletar/Dockerfile, -t, '${_IMAGEM}:${SHORT_SHA}', -t, '${_IMAGEM}:latest', .]
+  - id: enviar
+    name: gcr.io/cloud-builders/docker
+    args: [push, --all-tags, '${_IMAGEM}']
+  - id: jobs
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        for job in coleta-mensal coleta-lancamentos; do
+          gcloud run jobs update "$$job" --image '${_IMAGEM}:${SHORT_SHA}' --region '${_REGIAO}' --quiet
+        done
+options:
+  logging: CLOUD_LOGGING_ONLY
+  dynamicSubstitutions: true
