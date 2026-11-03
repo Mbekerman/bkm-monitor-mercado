@@ -2,7 +2,7 @@
 
 O coletor fica em `tools/coletar` (Python 3.11+, pacote `coletar`). A regra continua no banco: o comando só busca a fonte, grava o bruto e chama `im_abrir_coleta`, `im_importar` (lotes de até 50 empreendimentos e 400 unidades; empreendimento maior vai em partes, ver abaixo), `im_anotar_falha`, `im_falhar_coleta` e `im_fechar_coleta`. A interface é `FonteMercado`. Os adaptadores são `orulo_login` (completo), `orulo_planilha` (leitor à espera de amostra real) e `orulo_api` (esqueleto OAuth2 da API v2). As tabelas que ele lê são `im_ids_externos` e `im_empreendimento_estados`. O prefixo `im_` é minúsculo e sem aspas. Não há `empresa_id`.
 
-Não há credencial no repositório. Os crons rodam no Railway, nos serviços `coleta-mensal` e `coleta-lancamentos`.
+Não há credencial no repositório. Os crons rodam no Google Cloud Run, nos jobs `coleta-mensal` e `coleta-lancamentos` (projeto `bkm-monitor`, ver [cloud-run.md](cloud-run.md)).
 
 ## Comando
 
@@ -12,7 +12,12 @@ coletar --tipo mensal --data 2026-10-01 --fonte orulo_login --municipio "São Pa
 coletar --tipo lancamentos --data 2026-10-06
 coletar --tipo lancamentos --data 2026-10-06 --id 83029 --id 83030
 coletar --tipo mensal --data 2026-10-01 --fonte orulo_planilha --arquivo /caminho/tabela.xlsx --mapa mapa.json
+# o job do Cloud Run não passa flag; o tipo vem do ambiente e a data é hoje em São Paulo
+COLETAR_TIPO=lancamentos coletar
+COLETAR_TIPO=mensal coletar --id 83029
 ```
+
+`--tipo` e `--data` podem faltar. Sem `--tipo`, vale `COLETAR_TIPO` (`mensal` ou `lancamentos`). Sem `--data`, a referência é o dia de hoje em `America/Sao_Paulo`, nos dois tipos. Flag na linha de comando ganha do ambiente e do relógio. A mensal não volta para o mês anterior nem é empurrada para o dia 1: a agenda já dispara no dia 1 às 00:10, então "hoje" já é o dia 1. `referencia` é a data da foto e faz parte da chave única `(fonte, tipo, referencia)`. `im_abrir_coleta` desfaz e reabre uma coleta que já exista nessa data; usar o mês anterior reabriria a mensal fechada.
 
 `--tipo mensal` grava a coleta `completa_mensal` e abre cada empreendimento da listagem: detalhe e unidades. `--tipo lancamentos` grava `lancamentos` e só varre a listagem, para achar o que ainda não está no banco. Cada empreendimento novo é aberto um a um, com `detalhe` e unidades (preço de lançamento, tipologias, total de unidades, estoque, datas). Quem já existe não é buscado de novo; a mensal cobre. A espera entre pedidos continua de 2 a 3 segundos.
 
@@ -20,7 +25,7 @@ coletar --tipo mensal --data 2026-10-01 --fonte orulo_planilha --arquivo /caminh
 
 Sem `--municipio`, entram São Paulo e São José dos Campos. `--fonte` padrão é `orulo_login`.
 
-Saída 0 quando a coleta fecha completa, 2 quando fica incompleta, 3 quando falha (login), 1 em erro de uso ou de rede. Erro de rede (`httpx.HTTPError`, inclusive falha de conexão) marca a coleta aberta como `falhou` e sai com 1, sem traceback.
+Saída 0 quando a coleta fecha completa, 2 quando fica incompleta, 3 quando falha (login), 1 em erro de uso, de configuração ou de rede. Sem `--tipo` e sem `COLETAR_TIPO` válido, ou com `--data` que não seja `AAAA-MM-DD`, sai 1 e não abre coleta: o Cloud Run marca a execução como falha. Flag desconhecida continua saindo 2, pelo argparse. `--help` sai 0 e não coleta; o job não deve receber `--help`, senão a execução fica verde sem ter coletado. Erro de rede (`httpx.HTTPError`, inclusive falha de conexão) marca a coleta aberta como `falhou` e sai com 1, sem traceback.
 
 ## Variáveis
 
@@ -30,7 +35,7 @@ Saída 0 quando a coleta fecha completa, 2 quando fica incompleta, 3 quando falh
 | `ORULO_CLIENT_ID`, `ORULO_CLIENT_SECRET` | OAuth2 client credentials do `orulo_api` (`POST /oauth/token`). Sem as duas, o adaptador não chama a rede. |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | API do Supabase. A chave não vai para o repositório. |
 | `ORULO_ATRASO_MIN`, `ORULO_ATRASO_MAX` | Espera entre pedidos, em segundos. Padrão 2 e 3. |
-| `COLETAR_TIPO` | No cron: `mensal` ou `lancamentos`. |
+| `COLETAR_TIPO` | `mensal` ou `lancamentos`, quando `--tipo` não vem na linha de comando. É o que os jobs do Cloud Run definem. |
 | `COLETAR_UNIDADES_POR_CHAMADA`, `COLETAR_UNIDADES_MINIMO` | Unidades por chamada de `im_importar` (padrão 400) e o menor pedaço (padrão 25). Ver "Importação em partes". |
 | `COLETAR_PG_DSN`, `COLETAR_BRUTO_DIR` | Só para um Postgres local, no lugar do Supabase. O teste ponta a ponta usa isso por conta própria. |
 
@@ -48,7 +53,7 @@ O resultado é o mesmo de uma chamada só: venda, unidade removida e vínculo s�
 
 `im_fechar_coleta(coleta, esperados, forcar_incompleta)` faz tudo em comandos de conjunto (antes era um laço por unidade, que levava horas numa carga mensal de ~400 mil unidades): totais, vínculo, venda vista (`ultimo_visto`), venda anterior ao monitor (`estimado`, pela mediana do m² das disponíveis do mesmo empreendimento, dormitórios e vagas, área até 3% diferente), venda desfeita e unidade removida. Mesmo resultado da versão com laço (`testes/test_fechamento_e2e.py`). Numa base desse tamanho passa dos 8 s que a API dá a cada comando (o fechamento de 2026-10 levou cerca de 2 minutos). Por isso `im_fechar_coleta` tem `statement_timeout` próprio de 10 min (migration `fechar_timeout`; os papéis `service_role`, `authenticated` e `anon` ficam como estão), e o coletor espera a resposta por até 11 min. O gateway da API do Supabase corta a requisição HTTP em ~125 s com 504, mas o banco continua até o fim. Quando a resposta se perde (502/503/504, leitura estourada, conexão caída), o coletor não chama `im_falhar_coleta`: lê `im_coletas` a cada 15 s até a coleta sair de `rodando` (até 12 min) e usa a situação e os totais gravados; vendas e removidas vêm de contagens. Se ela continuar `rodando`, sai com 1 e a coleta fica aberta para conferir à mão.
 
-Cobertura: `esperados` é o número de empreendimentos visitados pelo coletor, inclusive os que ficaram fora do filtro. O fechamento desconta os que têm falha `fora_do_filtro` e não entraram nesta coleta (`esperados_no_filtro`). A coleta fica `incompleta` se `coletados` < 90% de `esperados_no_filtro` (`cobertura_minima_pct`) ou < 90% da mensal anterior. O CLI continua mandando os visitados; não há mudança no Railway.
+Cobertura: `esperados` é o número de empreendimentos visitados pelo coletor, inclusive os que ficaram fora do filtro. O fechamento desconta os que têm falha `fora_do_filtro` e não entraram nesta coleta (`esperados_no_filtro`). A coleta fica `incompleta` se `coletados` < 90% de `esperados_no_filtro` (`cobertura_minima_pct`) ou < 90% da mensal anterior. O CLI continua mandando os visitados.
 
 ## Planilha
 
@@ -58,16 +63,16 @@ O mapa padrão está em `COLUNAS` (`tools/coletar/coletar/orulo_planilha.py`): `
 
 Toda rodada desta fonte registra o aviso: o leitor ainda precisa ser validado com uma planilha real do Órulo.
 
-## Cron no Railway
+## Agenda
 
-São dois serviços, os dois com a imagem `tools/coletar/Dockerfile`. O cron do Railway é UTC.
+São dois jobs do Cloud Run, os dois com a imagem `tools/coletar/Dockerfile`, sem argumentos no container. O Cloud Scheduler dispara no fuso de São Paulo. Montagem e o teste de uma execução estão em [cloud-run.md](cloud-run.md).
 
-| Serviço | Config | Cron (UTC) | Horário em São Paulo | `COLETAR_TIPO` |
-| --- | --- | --- | --- | --- |
-| `coleta-mensal` | `tools/coletar/railway.mensal.json` | `10 3 1 * *` | dia 1 às 00:10 | `mensal` |
-| `coleta-lancamentos` | `tools/coletar/railway.lancamentos.json` | `0 9 * * 1` | segunda às 06:00 | `lancamentos` |
+| Job | Agenda (America/Sao_Paulo) | Em UTC | `COLETAR_TIPO` |
+| --- | --- | --- | --- |
+| `coleta-mensal` | `10 0 1 * *` (dia 1, 00:10) | 03:10 | `mensal` |
+| `coleta-lancamentos` | `0 6 * * 1` (segunda, 06:00) | 09:00 | `lancamentos` |
 
-No serviço: caminho do config acima, variáveis da tabela (e-mail e senha no mensal e no semanal, mais `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY`). `10 3 1 * *` é 03:10 UTC, 00:10 em São Paulo, no dia 1. `0 9 * * 1` é 09:00 UTC, 06:00 em São Paulo, na segunda. `restartPolicyType` é `NEVER` para o cron não ficar em laço.
+`ORULO_EMAIL`, `ORULO_PASSWORD`, `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY` vêm do Secret Manager. `COLETAR_TIPO` é variável do job. Sem `--data`, a referência é o dia da execução em São Paulo: no dia 1 às 00:10 isso já é o dia 1; na segunda às 06:00 é essa segunda. Os dois horários caem depois da meia-noite UTC, então a data UTC antiga coincidia; entre 00:00 e 02:59 UTC o dia em São Paulo ainda é o anterior, e o padrão agora segue o fuso da agenda.
 
 ## Testes
 

@@ -1,11 +1,14 @@
 #!/bin/sh
-# Cron do Railway. COLETAR_TIPO=mensal ou lancamentos, definido no serviço.
-# A data é o dia UTC. coleta-mensal roda às 03:10 UTC do dia 1 (00:10 em São Paulo).
-# coleta-lancamentos roda às 09:00 UTC de segunda (06:00 em São Paulo).
+# Job do Cloud Run, disparado pelo Cloud Scheduler. O job não passa argumentos:
+# o CLI lê COLETAR_TIPO e usa a data de hoje em America/Sao_Paulo.
+# --tipo e --data na linha de comando ganham do ambiente. Outros argumentos
+# (por exemplo --id) são repassados.
+#
+# python:3.12-slim termina com CMD ["python3"]. Definir ENTRYPOINT zera esse
+# CMD no builder atual; se "python3" ainda chegar sozinho, o argparse imprime
+# o usage e a coleta não roda. Descartamos só esse caso.
 set -eu
-if [ -z "${COLETAR_TIPO:-}" ]; then
-  echo "Defina COLETAR_TIPO=mensal ou COLETAR_TIPO=lancamentos" >&2
-  exit 1
+if [ "$#" -eq 1 ] && [ "$1" = "python3" ]; then
+  shift
 fi
-DATA="$(date -u +%F)"
-exec python -m coletar --tipo "$COLETAR_TIPO" --data "$DATA" "$@"
+exec python -m coletar "$@"

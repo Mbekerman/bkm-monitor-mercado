@@ -50,11 +50,11 @@ Variáveis da rodada:
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | API do Supabase, papel `service_role` |
 | `ORULO_CLIENT_ID`, `ORULO_CLIENT_SECRET` | Opcionais. Só o esqueleto `orulo_api` |
 | `ORULO_ATRASO_MIN`, `ORULO_ATRASO_MAX` | Opcionais. Padrão 2 e 3 segundos |
-| `COLETAR_TIPO` | No cron: `mensal` ou `lancamentos` |
+| `COLETAR_TIPO` | `mensal` ou `lancamentos` quando o comando não traz `--tipo` |
 
-Não existe `EMPRESA_ID`. A semanal de lançamentos só varre a listagem e abre, um a um, o empreendimento que ainda não está no banco (detalhe e unidades). `--id` recolhe um ou mais empreendimentos sem essa varredura. O detalhe do comando, da planilha e dos dois crons está em [docs/coletar.md](docs/coletar.md).
+Não existe `EMPRESA_ID`. A semanal de lançamentos só varre a listagem e abre, um a um, o empreendimento que ainda não está no banco (detalhe e unidades). `--id` recolhe um ou mais empreendimentos sem essa varredura. O detalhe do comando, da planilha e dos dois jobs está em [docs/coletar.md](docs/coletar.md).
 
-Vendas (`coleta-mensal`), dia 1 às 00:10 em São Paulo: `tools/coletar/railway.mensal.json`, cron `10 3 1 * *` (03:10 UTC). Lançamentos (`coleta-lancamentos`), segunda às 06:00 em São Paulo: `tools/coletar/railway.lancamentos.json`, cron `0 9 * * 1` (09:00 UTC). Os arquivos estão prontos para um projeto Railway próprio. Este repositório não faz o deploy.
+Vendas (`coleta-mensal`), dia 1 às 00:10 em São Paulo (`10 0 1 * *`), e lançamentos (`coleta-lancamentos`), segunda às 06:00 (`0 6 * * 1`), são jobs do Cloud Run no projeto `bkm-monitor`, região `southamerica-east1`, sem argumentos no container. O tipo vem de `COLETAR_TIPO` e a data é o dia da execução em `America/Sao_Paulo`. Montagem e o comando de teste em [docs/cloud-run.md](docs/cloud-run.md). Este repositório não faz o deploy.
 
 ## Como o BKM Terrenos lê
 
