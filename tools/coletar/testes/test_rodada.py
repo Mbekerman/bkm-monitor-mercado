@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import gzip
 import json
-from datetime import date
+import os
+import subprocess
+import sys
+from datetime import date, datetime, timezone
+from pathlib import Path
 
 import httpx
 import pytest
@@ -358,3 +362,123 @@ def test_banco_supabase_monta_rpc_e_storage():
     assert "/storage/v1/object/im-bruto/mercado/2026-10-01-completa_mensal.json.gz" in vistos[3][1]
     assert b"chave-de-teste" not in vistos[3][3]
     assert "empresa_id" not in vistos[4][1]
+
+
+def _rodar_processo(argv, **env_extra):
+    env = os.environ.copy()
+    env.pop("COLETAR_TIPO", None)
+    env.pop("COLETAR_PG_DSN", None)
+    env.update(env_extra)
+    raiz = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = raiz
+    return subprocess.run(
+        [sys.executable, "-m", "coletar", *argv],
+        cwd=raiz, env=env, capture_output=True, text=True,
+    )
+
+
+def test_sem_args_usa_coletar_tipo_e_hoje_em_sao_paulo(monkeypatch, caplog):
+    # 03:10 UTC do dia 1 é 00:10 em São Paulo: a mensal cai no dia 1, não no mês anterior.
+    banco = BancoMem()
+    fonte = FonteFixa([{"id_externo": "1"}])
+    monkeypatch.setenv("COLETAR_TIPO", " mensal ")
+    momento = datetime(2026, 11, 1, 3, 10, tzinfo=timezone.utc)
+    with caplog.at_level("INFO", logger="coletar"):
+        codigo = main([], fonte=fonte, banco=banco, agora=momento)
+    assert codigo == 0
+    assert banco.chamadas[0][2] == "completa_mensal"
+    assert banco.chamadas[0][3] == "2026-11-01"
+    assert "referência 2026-11-01, tipo mensal" in caplog.text
+
+
+def test_meia_noite_utc_ainda_e_o_dia_anterior_em_sao_paulo(monkeypatch):
+    # 02:30 UTC é 23:30 do dia anterior em São Paulo (UTC−3, sem horário de verão).
+    banco = BancoMem()
+    fonte = FonteFixa([{"id_externo": "1"}])
+    monkeypatch.setenv("COLETAR_TIPO", "lancamentos")
+    momento = datetime(2026, 11, 3, 2, 30, tzinfo=timezone.utc)
+    assert main([], fonte=fonte, banco=banco, agora=momento) == 0
+    assert fonte.ctx.tipo == "lancamentos"
+    assert fonte.ctx.referencia == date(2026, 11, 2)
+
+
+def test_segunda_de_lancamentos_cai_no_mesmo_dia(monkeypatch):
+    # Agenda: segunda 06:00 em São Paulo = 09:00 UTC. O dia não muda.
+    banco = BancoMem()
+    fonte = FonteFixa([{"id_externo": "83029"}])
+    monkeypatch.setenv("COLETAR_TIPO", "lancamentos")
+    momento = datetime(2026, 11, 2, 9, 0, tzinfo=timezone.utc)
+    assert main(["--id", "83029"], fonte=fonte, banco=banco, agora=momento) == 0
+    assert fonte.ctx.ids == ("83029",)
+    assert fonte.ctx.referencia == date(2026, 11, 2)
+    assert banco.chamadas[0][2] == "lancamentos"
+
+
+def test_flag_explicita_ganha_do_ambiente_e_do_relogio(monkeypatch):
+    banco = BancoMem()
+    fonte = FonteFixa([{"id_externo": "1"}])
+    monkeypatch.setenv("COLETAR_TIPO", "lancamentos")
+    momento = datetime(2026, 11, 3, 12, tzinfo=timezone.utc)
+    codigo = main(
+        ["--tipo", "mensal", "--data", "2026-10-01"],
+        fonte=fonte, banco=banco, agora=momento,
+    )
+    assert codigo == 0
+    assert banco.chamadas[0][2] == "completa_mensal"
+    assert banco.chamadas[0][3] == "2026-10-01"
+
+
+def test_tipo_ausente_ou_invalido_sai_1_sem_abrir(monkeypatch, capsys):
+    banco = BancoMem()
+    fonte = FonteFixa([{"id_externo": "1"}])
+    monkeypatch.delenv("COLETAR_TIPO", raising=False)
+    assert main([], fonte=fonte, banco=banco) == 1
+    assert "COLETAR_TIPO" in capsys.readouterr().err
+    assert banco.chamadas == []
+    monkeypatch.setenv("COLETAR_TIPO", "semanal")
+    assert main([], fonte=fonte, banco=banco) == 1
+    assert banco.chamadas == []
+
+
+def test_data_invalida_sem_tipo_na_linha_sai_1(monkeypatch, capsys):
+    monkeypatch.setenv("COLETAR_TIPO", "mensal")
+    banco = BancoMem()
+    assert main(["--data", "2026-13-01"], fonte=FonteFixa([]), banco=banco) == 1
+    assert "AAAA-MM-DD" in capsys.readouterr().err
+    assert banco.chamadas == []
+
+
+def test_fuso_sem_base_iana_usa_utc_menos_3(monkeypatch):
+    from zoneinfo import ZoneInfoNotFoundError
+
+    from coletar import cli
+
+    def sem_fuso(_nome):
+        raise ZoneInfoNotFoundError("sem tzdata")
+
+    monkeypatch.setattr(cli, "ZoneInfo", sem_fuso)
+    momento = datetime(2026, 11, 3, 2, 30, tzinfo=timezone.utc)
+    assert cli.data_de_hoje(momento) == date(2026, 11, 2)
+
+
+def test_tipo_desconhecido_na_flag_sai_2():
+    with pytest.raises(SystemExit) as saida:
+        main(["--tipo", "semanal", "--data", "2026-10-24"])
+    assert saida.value.code not in (0, None)
+    assert saida.value.code == 2
+
+
+def test_processo_sem_config_nao_sai_zero():
+    sem = _rodar_processo([])
+    assert sem.returncode == 1
+    assert "usage:" not in sem.stderr
+    assert "COLETAR_TIPO" in sem.stderr
+    invalido = _rodar_processo([], COLETAR_TIPO="semanal")
+    assert invalido.returncode == 1
+    assert "usage:" not in invalido.stderr
+    ajuda = _rodar_processo(["--help"])
+    assert ajuda.returncode == 0
+    assert ajuda.stdout.startswith("usage: coletar")
+    desconhecido = _rodar_processo(["--nao-existe"])
+    assert desconhecido.returncode == 2
+    assert "usage: coletar" in desconhecido.stderr

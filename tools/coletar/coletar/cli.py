@@ -1,11 +1,16 @@
-"""Linha de comando: coletar --tipo mensal|lancamentos --data AAAA-MM-DD."""
+"""Linha de comando: coletar --tipo mensal|lancamentos --data AAAA-MM-DD.
+
+Sem --tipo, vale COLETAR_TIPO. Sem --data, vale o dia de hoje em America/Sao_Paulo.
+Assim o job do Cloud Run, que não passa argumentos, coleta de verdade.
+"""
 from __future__ import annotations
 
 import argparse
 import logging
 import os
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -25,6 +30,48 @@ MUNICIPIOS = (
 )
 
 TIPOS = {"mensal": "completa_mensal", "lancamentos": "lancamentos", "completa_mensal": "completa_mensal"}
+TIPOS_CLI = ("mensal", "lancamentos")
+# Brasil não usa horário de verão desde 2019. Se o sistema não tiver o fuso,
+# America/Sao_Paulo é UTC−3 o ano inteiro.
+_FUSO_FIXO = timezone(timedelta(hours=-3))
+
+
+def fuso_sao_paulo():
+    try:
+        return ZoneInfo("America/Sao_Paulo")
+    except ZoneInfoNotFoundError:
+        return _FUSO_FIXO
+
+
+def data_de_hoje(agora: datetime | None = None) -> date:
+    """Dia civil em America/Sao_Paulo. `agora` ingênuo é lido nesse fuso."""
+    fuso = fuso_sao_paulo()
+    momento = agora if agora is not None else datetime.now(fuso)
+    if momento.tzinfo is None:
+        momento = momento.replace(tzinfo=fuso)
+    return momento.astimezone(fuso).date()
+
+
+def resolver_tipo(explicito: str | None) -> str:
+    if explicito:
+        bruto = explicito.strip().lower()
+    else:
+        bruto = os.environ.get("COLETAR_TIPO", "").strip().lower()
+    if bruto not in TIPOS_CLI:
+        raise ColetaErro(
+            "tipo ausente ou inválido: passe --tipo mensal|lancamentos "
+            "ou defina COLETAR_TIPO=mensal|lancamentos"
+        )
+    return bruto
+
+
+def resolver_data(explicito: str | None, agora: datetime | None = None) -> date:
+    if explicito is None:
+        return data_de_hoje(agora)
+    try:
+        return date.fromisoformat(explicito.strip())
+    except ValueError:
+        raise ColetaErro("data inválida: use AAAA-MM-DD") from None
 
 
 def _atraso() -> tuple[float, float]:
@@ -120,8 +167,14 @@ def criar_banco():
 
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="coletar", description="Coleta do monitor de mercado")
-    p.add_argument("--tipo", required=True, choices=["mensal", "lancamentos"], help="mensal (completa) ou lancamentos (semanal)")
-    p.add_argument("--data", required=True, help="data de referência AAAA-MM-DD")
+    p.add_argument(
+        "--tipo", choices=list(TIPOS_CLI), default=None,
+        help="mensal (completa) ou lancamentos (semanal). Sem a flag, usa COLETAR_TIPO",
+    )
+    p.add_argument(
+        "--data", default=None,
+        help="data de referência AAAA-MM-DD. Sem a flag, o dia de hoje em America/Sao_Paulo",
+    )
     p.add_argument("--fonte", default="orulo_login", choices=["orulo_login", "orulo_planilha", "orulo_api"])
     p.add_argument("--municipio", action="append", default=None, help="repete para cada cidade; padrão São Paulo e São José dos Campos")
     p.add_argument("--arquivo", default=None, help="planilha .csv ou .xlsx, obrigatório em orulo_planilha")
@@ -133,15 +186,17 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv=None, *, fonte=None, banco=None) -> int:
+def main(argv=None, *, fonte=None, banco=None, agora: datetime | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     args = parser().parse_args(argv)
     try:
-        referencia = date.fromisoformat(args.data)
-    except ValueError:
-        print("data inválida: use AAAA-MM-DD", file=sys.stderr)
+        tipo_nome = resolver_tipo(args.tipo)
+        referencia = resolver_data(args.data, agora)
+    except ColetaErro as e:
+        print(str(e), file=sys.stderr)
         return 1
-    tipo = TIPOS[args.tipo]
+    tipo = TIPOS[tipo_nome]
+    logging.getLogger("coletar").info("referência %s, tipo %s", referencia.isoformat(), tipo_nome)
     proprio_banco = banco is None
     try:
         municipios = municipios_pedidos(args.municipio)
