@@ -144,6 +144,13 @@ def executar(banco, fonte: FonteMercado, ctx: ContextoColeta) -> ResultadoRodada
         coleta_id, situacao, ultimo.get("coletados"), ultimo.get("unidades"), resultado.esperados,
         fechamento.get("vendas"), fechamento.get("removidas"), ultimo.get("erros"), ultimo.get("ignorados"),
     )
+    # Resumo do empreendimento: as unidades novas entram nos grupos (falhar aqui não derruba a coleta;
+    # a próxima rodada agrupa o que ficou).
+    try:
+        ag = banco.agrupar() or {}
+        log.info("agrupamento: %s empreendimentos, %s unidades", ag.get("empreendimentos"), ag.get("unidades"))
+    except Exception as e:  # noqa: BLE001
+        log.warning("AVISO: agrupamento falhou: %s", e)
     if situacao == "incompleta":
         log.warning(
             "AVISO: coleta incompleta (coletados=%s, esperados=%s)",
