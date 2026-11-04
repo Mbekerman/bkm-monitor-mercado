@@ -38,6 +38,12 @@ class BancoMem:
         self.chamadas.append(("fechar", esperados, forcar_incompleta))
         return {"situacao": "incompleta" if forcar_incompleta else "completa", "vendas": 0, "removidas": 0}
 
+    agrupados = 0
+
+    def agrupar(self):
+        self.agrupados += 1
+        return {"empreendimentos": 0, "unidades": 0}
+
     def anotar_falha(self, coleta, id_externo, motivo, detalhe):
         self.chamadas.append(("anotar", id_externo, motivo))
 
@@ -482,3 +488,18 @@ def test_processo_sem_config_nao_sai_zero():
     desconhecido = _rodar_processo(["--nao-existe"])
     assert desconhecido.returncode == 2
     assert "usage: coletar" in desconhecido.stderr
+
+
+def test_agrupa_depois_de_fechar():
+    banco = BancoMem()
+    executar(banco, FonteFixa([{"id_externo": "1"}]), _ctx())
+    assert banco.agrupados == 1
+
+
+def test_agrupamento_que_falha_nao_derruba_a_coleta():
+    class BancoAgrupaMal(BancoMem):
+        def agrupar(self):
+            raise RuntimeError("caiu")
+    banco = BancoAgrupaMal()
+    resultado = executar(banco, FonteFixa([{"id_externo": "1"}]), _ctx())
+    assert resultado.situacao == "completa"

@@ -2,7 +2,7 @@
 
 Coleta e armazenamento de empreendimentos residenciais em São Paulo e São José dos Campos. O dado é da BKM inteira: não há empresa, não há schema `app` e não há tabela do BKM Terrenos. O BKM Terrenos só lê estas tabelas depois.
 
-Fase 1 grava unidade por unidade, com `preco_primeiro`, vigência de preço e situação, e a venda no fechamento da mensal completa. Não há vista nem função de velocidade, estoque, grupo ou lançamento. A leitura é direta nas tabelas, pela API REST do Supabase.
+Fase 1 grava unidade por unidade, com `preco_primeiro`, vigência de preço e situação, e a venda no fechamento da mensal completa. Não há vista nem função de velocidade, estoque ou lançamento. A leitura é direta nas tabelas, pela API REST do Supabase.
 
 ```mermaid
 erDiagram
@@ -17,6 +17,16 @@ erDiagram
   im_coletas ||--o{ im_vendas : fecha
   im_empreendimentos ||--o{ im_sugestoes_vinculo : sugere
 ```
+
+
+## Resumo do empreendimento (grupos)
+
+Desde 4/nov/2026 o banco agrupa as unidades de cada empreendimento em tipologias parecidas, só na leitura (nada do que foi coletado muda). Regra do Moisés, descrita no topo de `supabase/migrations/20261104120000_grupos.sql`: mesmos dormitórios, vagas e programa social; área por mediana iterativa a partir da planta-tipo; R$/m² do `preco_primeiro` com saltos no mesmo andar e entre andares; grupo pequeno só junta a um que difere apenas na área. Limites em `im_mercado_config`.
+
+- `im_grupos`: o grupo, com as faixas de área e de R$/m² de quando nasceu; `encerrado_em` quando reagrupado.
+- `im_unidade_grupos`: o grupo de cada unidade, com `desde` e `ate` (vigente = `ate` nulo). Unidade já agrupada não muda de grupo.
+- `im_agrupar(p_emp)`: agrupa as unidades ainda sem grupo (as novas entram no grupo aberto que as comporta; as outras passam pela regra só entre elas). O coletor chama ao fim de cada rodada.
+- `im_reagrupar(p_emp)`: encerra os grupos e refaz tudo; a venda antiga fica com o grupo da época (a ligação vigente na data da coleta que a gravou).
 
 ## Banco
 

@@ -165,6 +165,15 @@ class BancoSupabase:
         except httpx.HTTPError:
             return None
 
+    def agrupar(self) -> dict:
+        """im_agrupar: põe em grupo (resumo do empreendimento) as unidades que ainda não têm.
+        Tem statement_timeout próprio de 10 min; o gateway pode cortar antes, mas o banco segue."""
+        r = self.http.post(f"{self.url}/rest/v1/rpc/im_agrupar", headers=self._cabecalhos(), json={},
+                           timeout=httpx.Timeout(30.0, read=FECHAR_LEITURA_S))
+        if r.status_code >= 400:
+            raise ColetaErro(f"im_agrupar retornou {r.status_code}: {r.text[:300]}")
+        return r.json() if r.text and r.text != "null" else {}
+
     def anotar_falha(self, coleta_id: str, id_externo: str | None, motivo: str, detalhe: str) -> None:
         self._rpc("im_anotar_falha", {
             "p_coleta": coleta_id,
@@ -253,6 +262,10 @@ class BancoPostgres:
             "select public.im_fechar_coleta(%s::uuid, %s::int, %s)",
             (coleta_id, esperados, forcar_incompleta),
         ).fetchone()
+        return _py(row[0]) or {}
+
+    def agrupar(self) -> dict:
+        row = self.conn.execute("select public.im_agrupar()").fetchone()
         return _py(row[0]) or {}
 
     def anotar_falha(self, coleta_id: str, id_externo: str | None, motivo: str, detalhe: str) -> None:

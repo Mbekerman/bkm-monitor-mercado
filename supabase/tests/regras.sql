@@ -45,8 +45,8 @@ select pg_temp.ok(not exists (
   join pg_class c on c.oid = t.tgrelid
   join pg_namespace n on n.oid = c.relnamespace
   where n.nspname = 'auth' and c.relname = 'users' and not t.tgisinternal), 'não cria trigger em auth.users');
-select pg_temp.ok((select count(*) = 12 from pg_class c join pg_namespace n on n.oid = c.relnamespace
-  where n.nspname = 'public' and c.relkind = 'r' and c.relname like 'im_%'), 'doze tabelas im_');
+select pg_temp.ok((select count(*) = 15 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relkind = 'r' and c.relname like 'im_%'), 'quinze tabelas im_');
 select pg_temp.ok((select public = false from storage.buckets where id = 'im-bruto'), 'bucket im-bruto é privado');
 select pg_temp.ok(not exists (
   select 1 from pg_policy pol
@@ -461,5 +461,90 @@ select pg_temp.ok((select count(*) = 2 from regexp_matches(
 select pg_temp.ok((select 'statement_timeout=10min' = any(proconfig) from pg_proc
    where oid = 'public.im_fechar_coleta(uuid,int,boolean)'::regprocedure),
   'fechamento tem statement_timeout próprio de 10 min (a API corta em 8 s)');
+
+-- ---------------------------------------------------------------------
+\echo '# resumo do empreendimento: grupos (regra do Moisés, 4/nov/2026)'
+create function pg_temp.emp(p_ext text) returns uuid language sql stable as $$
+  select entidade_id from public.im_ids_externos where entidade = 'empreendimento' and id_externo = p_ext $$;
+-- tamanhos dos grupos abertos, em ordem
+create function pg_temp.tam(p_ext text) returns text language sql stable as $$
+  select coalesce(string_agg(n::text, ',' order by n), '') from (
+    select count(*) n from public.im_unidade_grupos ug join public.im_grupos g on g.id = ug.grupo_id
+     where g.empreendimento_id = pg_temp.emp(p_ext) and ug.ate is null and g.encerrado_em is null group by g.id) x $$;
+create function pg_temp.peq(p_ext text) returns text language sql stable as $$
+  select coalesce(string_agg(case when g.pequeno then 'p' else '-' end || n::text, ',' order by n), '') from (
+    select g.id, count(*) n from public.im_unidade_grupos ug join public.im_grupos g on g.id = ug.grupo_id
+     where g.empreendimento_id = pg_temp.emp(p_ext) and ug.ate is null and g.encerrado_em is null group by g.id) x
+    join public.im_grupos g on g.id = x.id $$;
+-- unidades: (número, área, R$/m², andar[, dorm, vagas]); preço vazio quando m2 é nulo
+create function pg_temp.us(p jsonb) returns jsonb language sql immutable as $$
+  select jsonb_agg(pg_temp.uj(x->>0, (x->>1)::numeric,
+    case when x->>2 is null then null else round((x->>1)::numeric * (x->>2)::numeric) end, 'disponivel',
+    coalesce((x->>4)::int, 2), coalesce((x->>5)::int, 0), (x->>3)::int)) from jsonb_array_elements(p) x $$;
+
+select public.im_abrir_coleta('orulo_api', 'lancamentos', '2026-11-04') as c_g1 \gset
+select public.im_importar(:'c_g1', jsonb_build_array(
+  pg_temp.ej('g-area', 'Áreas 40 41 42', pg_temp.us('[["1",40,10000,1],["2",40,10000,2],["3",40,10000,3],["4",41,10000,1],["5",41,10000,2],["6",41,10000,3],["7",42,10000,1],["8",42,10000,2],["9",42,10000,3]]')),
+  pg_temp.ej('g-4044', 'Áreas 40 e 44', pg_temp.us('[["1",40,10000,1],["2",40,10000,2],["3",40,10000,3],["4",44,10000,1],["5",44,10000,2],["6",44,10000,3]]')),
+  pg_temp.ej('g-rampa', 'Rampa', (select pg_temp.us(jsonb_agg(jsonb_build_array(a::text, 40, 10000 * 1.01 ^ a, a))) from generate_series(1, 20) a)),
+  pg_temp.ej('g-salto', 'Salto', (select pg_temp.us(jsonb_agg(jsonb_build_array(a::text, 40, case when a <= 5 then 10000 else 10500 end, a))) from generate_series(1, 10) a)),
+  pg_temp.ej('g-15', 'Mesmo andar 1,5%', pg_temp.us('[["1",40,10000,1],["2",40,10000,2],["3",40,10000,3],["4",40,10150,1],["5",40,10150,2],["6",40,10150,3]]')),
+  pg_temp.ej('g-25', 'Mesmo andar 2,5%', pg_temp.us('[["1",40,10000,1],["2",40,10000,2],["3",40,10000,3],["4",40,10250,1],["5",40,10250,2],["6",40,10250,3]]')),
+  pg_temp.ej('g-vaga', 'Com e sem vaga', pg_temp.us('[["1",40,10000,1,2,0],["2",40,10000,2,2,0],["3",40,10000,3,2,0],["4",40,10000,1,2,1],["5",40,10000,2,2,1],["6",40,10000,3,2,1]]')),
+  pg_temp.ej('g-peq-preco', 'Pequeno com outro preço', pg_temp.us('[["1",40,10000,1],["2",40,10000,2],["3",40,10000,3],["4",40,10000,4],["5",40,10000,5],["6",40,11000,6],["7",40,11000,7]]')),
+  pg_temp.ej('g-peq-area', 'Pequeno com outra área', pg_temp.us('[["1",40,10000,1],["2",40,10000,2],["3",40,10000,3],["4",40,10000,4],["5",40,10000,5],["6",44,10100,6],["7",44,10100,7]]')),
+  pg_temp.ej('g-peq-ambos', 'Pequeno com outra área e outro preço', pg_temp.us('[["1",40,10000,1],["2",40,10000,2],["3",40,10000,3],["4",40,10000,4],["5",40,10000,5],["6",44,10500,6],["7",44,10500,7]]')),
+  pg_temp.ej('g-peq-dorm', 'Pequeno com outro dormitório', pg_temp.us('[["1",40,10000,1],["2",40,10000,2],["3",40,10000,3],["4",40,10000,4],["5",40,10000,5],["6",44,10000,6,3],["7",44,10000,7,3]]')),
+  pg_temp.ej('g-sem', 'Sem preço', pg_temp.us('[["1",40,10000,1],["2",40,10000,2],["3",40,10000,3],["4",40,10500,4],["5",40,10500,5],["6",40,10500,6],["7",40,null,5]]')),
+  pg_temp.ej('g-nula', 'Área nula', pg_temp.us('[["1",40,10000,1],["2",40,10000,2],["3",40,10000,3]]') || jsonb_build_array(pg_temp.uj('4', null, 400000, 'disponivel', 2, 0, 4)))
+));
+select pg_temp.ok(public.im_fechar_coleta(:'c_g1') is not null, 'coleta dos grupos fechada');
+set role service_role;
+select pg_temp.ok((public.im_agrupar()->>'unidades')::int > 0, 'service_role agrupa');
+set role authenticated;
+select pg_temp.falha($$select public.im_agrupar()$$, 'authenticated não agrupa');
+select pg_temp.falha($$select public.im_reagrupar()$$, 'authenticated não reagrupa');
+select pg_temp.ok((select count(*) > 0 from public.im_grupos), 'authenticated lê os grupos');
+set role postgres;
+select pg_temp.ok(pg_temp.tam('g-area') = '9', 'áreas 40, 41 e 42 formam um grupo só');
+select pg_temp.ok(pg_temp.tam('g-4044') = '3,3', '40 e 44 ficam em grupos separados');
+select pg_temp.ok(pg_temp.tam('g-rampa') = '20', 'rampa de 1% em 20 andares fica num grupo só');
+select pg_temp.ok(pg_temp.tam('g-salto') = '5,5', 'salto de 5% entre andares separa');
+select pg_temp.ok(pg_temp.tam('g-15') = '6', 'mesmo andar com 1,5% fica junto');
+select pg_temp.ok(pg_temp.tam('g-25') = '3,3', 'mesmo andar com 2,5% separa');
+select pg_temp.ok(pg_temp.tam('g-vaga') = '3,3', 'com e sem vaga não se misturam');
+select pg_temp.ok(pg_temp.peq('g-peq-preco') = 'p2,-5', 'grupo de 2 que difere no preço fica separado e pequeno');
+select pg_temp.ok(pg_temp.peq('g-peq-area') = 'p7', 'grupo de 2 que difere só na área junta e fica pequeno');
+select pg_temp.ok(pg_temp.tam('g-peq-ambos') = '2,5', 'grupo de 2 com outra área e outro preço fica separado');
+select pg_temp.ok(pg_temp.tam('g-peq-dorm') = '2,5', 'grupo pequeno não junta com outro dormitório');
+select pg_temp.ok((select bool_and(u.andar >= 4) from public.im_unidade_grupos ug join public.im_unidades u on u.id = ug.unidade_id
+   where ug.grupo_id = (select ug2.grupo_id from public.im_unidade_grupos ug2 join public.im_unidades u2 on u2.id = ug2.unidade_id
+                         where u2.empreendimento_id = pg_temp.emp('g-sem') and u2.preco_primeiro is null)),
+  'unidade sem preço vai para o grupo do mesmo andar');
+select pg_temp.ok(pg_temp.tam('g-nula') = '3', 'área nula fica fora');
+select pg_temp.ok((select (public.im_agrupar()->>'unidades')::int = 0), 'agrupar de novo não mexe em nada');
+
+\echo '# grupos estáveis'
+select string_agg(ug.grupo_id::text || ':' || ug.unidade_id, ',' order by ug.unidade_id) as g_antes
+  from public.im_unidade_grupos ug join public.im_grupos g on g.id = ug.grupo_id
+ where g.empreendimento_id = pg_temp.emp('g-4044') \gset
+select public.im_abrir_coleta('orulo_api', 'lancamentos', '2026-11-11') as c_g2 \gset
+select public.im_importar(:'c_g2', jsonb_build_array(
+  pg_temp.ej('g-4044', 'Áreas 40 e 44', pg_temp.us('[["1",40,10000,1],["2",40,10000,2],["3",40,10000,3],["4",44,10000,1],["5",44,10000,2],["6",44,10000,3],["7",40.5,10050,4],["8",60,9000,4],["9",60,9000,5],["10",60,9000,6]]'))));
+select pg_temp.ok(public.im_fechar_coleta(:'c_g2') is not null, 'segunda coleta fechada');
+select pg_temp.ok((public.im_agrupar(pg_temp.emp('g-4044'))->>'unidades')::int = 4, 'só as 4 unidades novas são agrupadas');
+select pg_temp.ok(pg_temp.tam('g-4044') = '3,3,4', 'a de 40,5 m² entra no grupo de 40 e as de 60 m² abrem grupo novo');
+select pg_temp.ok((select string_agg(ug.grupo_id::text || ':' || ug.unidade_id, ',' order by ug.unidade_id)
+  from public.im_unidade_grupos ug join public.im_grupos g on g.id = ug.grupo_id join public.im_unidades u on u.id = ug.unidade_id
+ where g.empreendimento_id = pg_temp.emp('g-4044') and u.numero not in ('7','8','9','10')) = :'g_antes', 'as unidades antigas não mudam de grupo');
+select pg_temp.ok((public.im_reagrupar(pg_temp.emp('g-4044'))->>'unidades')::int = 10, 'reagrupar refaz o empreendimento');
+select pg_temp.ok(pg_temp.tam('g-4044') = '3,3,4' and (select count(*) = 10 from public.im_unidade_grupos ug
+   join public.im_grupos g on g.id = ug.grupo_id where g.empreendimento_id = pg_temp.emp('g-4044') and ug.ate is not null),
+  'a ligação antiga fica com data de fim (a venda guarda o grupo da época)');
+select pg_temp.ok(pg_temp.tam('g-area') = '9', 'reagrupar um empreendimento não mexe nos outros');
+set role service_role;
+select pg_temp.ok((public.im_salvar_mercado_config('{"area_mediana_pct": 5}')).area_mediana_pct = 5, 'service_role muda os limites');
+set role postgres;
+select pg_temp.ok(not exists (select 1 from pg_class where relname = '_im_ag'), 'tabela de trabalho do agrupamento não fica');
 
 \echo 'TODOS OS TESTES PASSARAM'
