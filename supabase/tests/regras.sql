@@ -571,6 +571,19 @@ select pg_temp.ok(jsonb_array_length(:'h'::jsonb->'anos') = 2 and (:'h'::jsonb->
 select pg_temp.ok(jsonb_array_length(:'h'::jsonb->'trimestres') = 3 and jsonb_array_length(:'h'::jsonb->'semestres') = 2, 'trimestres e semestres');
 select pg_temp.ok((:'h'::jsonb->'geral'->>'vendido_pct')::numeric = 0.5 and (:'h'::jsonb->'geral'->>'meses_desde_lancamento')::int = 6
   and (:'h'::jsonb->'geral'->>'media_mensal')::numeric = round(0.5/6, 4), 'geral do projeto');
+select pg_temp.ok((:'h'::jsonb->'trimestres'->0->>'vso_mes')::numeric = round(1 - power(0.7, 1.0/2), 4),
+  'VSO mensal equivalente do trimestre = 1 − (1 − VSO)^(1/meses)');
+select pg_temp.ok(:'h'::jsonb->'mensal'->1->>'vso_mes_3m' is null and (:'h'::jsonb->'mensal'->2->>'vso_mes_3m')::numeric = round(1 - power(0.6, 1.0/3), 4),
+  'VSO mensal móvel de 3 meses começa no terceiro mês');
+select pg_temp.ok((:'h'::jsonb->'marcos'->'25'->>'meses')::int = 2 and (:'h'::jsonb->'marcos'->'25'->>'vso_mes')::numeric = round(1 - power(0.75, 0.5), 4),
+  'marco de 25% no segundo mês desde o lançamento');
+select pg_temp.ok(:'h'::jsonb->'marcos'->'75'->>'meses' is null and :'h'::jsonb->'marcos'->'99'->>'vso_mes' is null, 'marco não atingido fica nulo');
+select pg_temp.ok((:'h'::jsonb->'geral'->>'vso_mes')::numeric = round(1 - power(0.5, 1.0/6), 4), 'VSO mensal equivalente do projeto');
+insert into public.im_historico_orulo (orulo_id, mes, situacao, unidades, estoque, vendas, distratos) values
+  (999002, '2025-01-01', 'em_obras', 100, 40, 0, 0), (999002, '2025-02-01', 'em_obras', 100, 20, 20, 0);
+select pg_temp.ok((public._im_marcos_orulo(999002, '2024-06-01')->'25'->>'meses') is null
+  and (public._im_marcos_orulo(999002, '2024-06-01')->'75'->>'meses')::int = 9,
+  'marco já passado antes do histórico fica nulo; o que passa dentro conta desde o lançamento');
 update public.im_empreendimentos set data_lancamento = '2024-01-01' where id = pg_temp.emp('g-area');
 select pg_temp.ok(not (public.im_vso_historico(pg_temp.emp('g-area'))->>'completo')::boolean, 'lançado antes do histórico não é completo');
 select pg_temp.ok(public.im_vso_historico(pg_temp.emp('g-4044')) is null, 'sem número do Órulo devolve nulo');
