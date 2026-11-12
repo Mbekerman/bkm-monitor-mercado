@@ -45,8 +45,8 @@ select pg_temp.ok(not exists (
   join pg_class c on c.oid = t.tgrelid
   join pg_namespace n on n.oid = c.relnamespace
   where n.nspname = 'auth' and c.relname = 'users' and not t.tgisinternal), 'não cria trigger em auth.users');
-select pg_temp.ok((select count(*) = 15 from pg_class c join pg_namespace n on n.oid = c.relnamespace
-  where n.nspname = 'public' and c.relkind = 'r' and c.relname like 'im_%'), 'quinze tabelas im_');
+select pg_temp.ok((select count(*) = 16 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relkind = 'r' and c.relname like 'im_%'), 'dezesseis tabelas im_');
 select pg_temp.ok((select public = false from storage.buckets where id = 'im-bruto'), 'bucket im-bruto é privado');
 select pg_temp.ok(not exists (
   select 1 from pg_policy pol
@@ -546,5 +546,42 @@ set role service_role;
 select pg_temp.ok((public.im_salvar_mercado_config('{"area_mediana_pct": 5}')).area_mediana_pct = 5, 'service_role muda os limites');
 set role postgres;
 select pg_temp.ok(not exists (select 1 from pg_class where relname = '_im_ag'), 'tabela de trabalho do agrupamento não fica');
+
+\echo '# histórico mensal do Órulo'
+insert into public.im_ids_externos (entidade, entidade_id, fonte, id_externo)
+  values ('empreendimento', pg_temp.emp('g-area'), 'orulo_planilha', '999001');
+update public.im_empreendimentos set data_lancamento = '2025-11-10' where id = pg_temp.emp('g-area');
+insert into public.im_historico_orulo (orulo_id, mes, situacao, unidades, estoque, vendas, distratos) values
+  (999001, '2025-11-01', 'lancamento', 100, 100, 0, 0),
+  (999001, '2025-12-01', 'lancamento', 100, 70, 30, 0),
+  (999001, '2026-01-01', 'em_obras',   100, 60, 10, 0),
+  (999001, '2026-02-01', 'em_obras',   100, 90, 0, 30),
+  (999001, '2026-03-01', 'em_obras',   100, 55, 35, 0),
+  (999001, '2026-04-01', 'em_obras',   100, 50, 5, 0);
+select public.im_vso_historico(pg_temp.emp('g-area'))::jsonb as h \gset
+select pg_temp.ok((:'h'::jsonb->>'completo')::boolean, 'histórico que começa no lançamento é completo');
+select pg_temp.ok(jsonb_array_length(:'h'::jsonb->'mensal') = 6, 'série mensal com os seis meses');
+select pg_temp.ok((:'h'::jsonb->'mensal'->1->>'vso')::numeric = 0.3, 'VSO do mês = líquidas ÷ (líquidas + estoque)');
+select pg_temp.ok((:'h'::jsonb->'mensal'->3->>'liquidas')::int = -30 and :'h'::jsonb->'mensal'->3->>'vso' is null,
+  'mês com mais distrato que venda fica sem VSO');
+select pg_temp.ok((:'h'::jsonb->'janelas'->'3m'->>'liquidas')::int = 10 and (:'h'::jsonb->'janelas'->'3m'->>'vso')::numeric = round(10/60.0, 4),
+  'recarga de tabela (distrato e venda no mês seguinte) se anula em 3 meses');
+select pg_temp.ok((:'h'::jsonb->'janelas'->'todo'->>'vso')::numeric = 0.5, 'VSO do período inteiro');
+select pg_temp.ok(jsonb_array_length(:'h'::jsonb->'anos') = 2 and (:'h'::jsonb->'anos'->0->>'liquidas')::int = 30, 'anos fechados');
+select pg_temp.ok(jsonb_array_length(:'h'::jsonb->'trimestres') = 3 and jsonb_array_length(:'h'::jsonb->'semestres') = 2, 'trimestres e semestres');
+select pg_temp.ok((:'h'::jsonb->'geral'->>'vendido_pct')::numeric = 0.5 and (:'h'::jsonb->'geral'->>'meses_desde_lancamento')::int = 6
+  and (:'h'::jsonb->'geral'->>'media_mensal')::numeric = round(0.5/6, 4), 'geral do projeto');
+update public.im_empreendimentos set data_lancamento = '2024-01-01' where id = pg_temp.emp('g-area');
+select pg_temp.ok(not (public.im_vso_historico(pg_temp.emp('g-area'))->>'completo')::boolean, 'lançado antes do histórico não é completo');
+select pg_temp.ok(public.im_vso_historico(pg_temp.emp('g-4044')) is null, 'sem número do Órulo devolve nulo');
+select pg_temp.falha($$insert into public.im_historico_orulo (orulo_id, mes, unidades, estoque, vendas, distratos) values (1, '2026-01-15', 1, 1, 0, 0)$$, 'mês tem que ser o dia 1');
+select pg_temp.emp('g-area') as e_hist \gset
+set role anon;
+select pg_temp.ok(public.im_vso_historico(:'e_hist') is not null, 'anon lê o histórico pela função');
+select pg_temp.falha($$select 1 from public.im_historico_orulo$$, 'anon não lê a tabela');
+select pg_temp.falha($$select public._im_vso_orulo(999001, '2026-01-01', '2026-02-01')$$, 'anon não chama a função interna');
+set role authenticated;
+select pg_temp.falha($$insert into public.im_historico_orulo (orulo_id, mes, unidades, estoque, vendas, distratos) values (2, '2026-01-01', 1, 1, 0, 0)$$, 'authenticated não grava');
+set role postgres;
 
 \echo 'TODOS OS TESTES PASSARAM'
