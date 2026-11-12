@@ -575,14 +575,22 @@ select pg_temp.ok((:'h'::jsonb->'trimestres'->0->>'vso_mes')::numeric = round(1 
   'VSO mensal equivalente do trimestre = 1 − (1 − VSO)^(1/meses)');
 select pg_temp.ok(:'h'::jsonb->'mensal'->1->>'vso_mes_3m' is null and (:'h'::jsonb->'mensal'->2->>'vso_mes_3m')::numeric = round(1 - power(0.6, 1.0/3), 4),
   'VSO mensal móvel de 3 meses começa no terceiro mês');
-select pg_temp.ok((:'h'::jsonb->'marcos'->'25'->>'meses')::int = 2 and (:'h'::jsonb->'marcos'->'25'->>'vso_mes')::numeric = round(1 - power(0.75, 0.5), 4),
+select pg_temp.ok((:'h'::jsonb->'vendas'->'marcos'->'25'->>'meses')::int = 2 and (:'h'::jsonb->'vendas'->'marcos'->'25'->>'vso_mes')::numeric = round(1 - power(0.75, 0.5), 4),
   'marco de 25% no segundo mês desde o lançamento');
-select pg_temp.ok(:'h'::jsonb->'marcos'->'75'->>'meses' is null and :'h'::jsonb->'marcos'->'99'->>'vso_mes' is null, 'marco não atingido fica nulo');
+select pg_temp.ok(:'h'::jsonb->'vendas'->'marcos'->'75'->>'meses' is null and :'h'::jsonb->'vendas'->'marcos'->'99'->>'vso_mes' is null, 'marco não atingido fica nulo');
+select pg_temp.ok((:'h'::jsonb->'vendas'->>'quartil_atual')::int = 3 and (:'h'::jsonb->'vendas'->'marcos'->'50'->>'meses')::int = 6,
+  'com 50% vendido no sexto mês, está no terceiro quartil');
+select pg_temp.ok((:'h'::jsonb->'vendas'->'quartis'->1->>'meses')::int = 4
+  and (:'h'::jsonb->'vendas'->'quartis'->1->>'vso_mes')::numeric = round(1 - power(0.5/0.75, 1.0/4), 4),
+  'VSO do quartil de 25 a 50% = 1 − (0,50 ÷ 0,75)^(1/4)');
+select pg_temp.ok(:'h'::jsonb->'vendas'->'quartis'->2->>'situacao' = 'em_andamento' and :'h'::jsonb->'vendas'->'quartis'->3->>'situacao' = 'futuro',
+  'quartil atual em andamento e o seguinte futuro');
+
 select pg_temp.ok((:'h'::jsonb->'geral'->>'vso_mes')::numeric = round(1 - power(0.5, 1.0/6), 4), 'VSO mensal equivalente do projeto');
 insert into public.im_historico_orulo (orulo_id, mes, situacao, unidades, estoque, vendas, distratos) values
   (999002, '2025-01-01', 'em_obras', 100, 40, 0, 0), (999002, '2025-02-01', 'em_obras', 100, 20, 20, 0);
-select pg_temp.ok((public._im_marcos_orulo(999002, '2024-06-01')->'25'->>'meses') is null
-  and (public._im_marcos_orulo(999002, '2024-06-01')->'75'->>'meses')::int = 9,
+select pg_temp.ok((public._im_marcos_orulo(999002, '2024-06-01')->'marcos'->'25'->>'meses') is null
+  and (public._im_marcos_orulo(999002, '2024-06-01')->'marcos'->'75'->>'meses')::int = 9,
   'marco já passado antes do histórico fica nulo; o que passa dentro conta desde o lançamento');
 update public.im_empreendimentos set data_lancamento = '2024-01-01' where id = pg_temp.emp('g-area');
 select pg_temp.ok(not (public.im_vso_historico(pg_temp.emp('g-area'))->>'completo')::boolean, 'lançado antes do histórico não é completo');
