@@ -2,7 +2,7 @@
 
 Coleta e armazenamento de empreendimentos residenciais em São Paulo e São José dos Campos. O dado é da BKM inteira: não há empresa, não há schema `app` e não há tabela do BKM Terrenos. O BKM Terrenos só lê estas tabelas depois.
 
-Fase 1 grava unidade por unidade, com `preco_primeiro`, vigência de preço e situação, e a venda no fechamento da mensal completa. Não há vista nem função de velocidade, estoque ou lançamento. A leitura é direta nas tabelas, pela API REST do Supabase.
+Fase 1 grava unidade por unidade, com `preco_primeiro`, vigência de preço e situação, e a venda no fechamento da mensal completa. Não há vista nem função de velocidade, estoque ou lançamento sobre as unidades coletadas; o VSO histórico vem do relatório do Órulo (abaixo). A leitura é direta nas tabelas, pela API REST do Supabase.
 
 ```mermaid
 erDiagram
@@ -27,6 +27,18 @@ Desde 4/nov/2026 o banco agrupa as unidades de cada empreendimento em tipologias
 - `im_unidade_grupos`: o grupo de cada unidade, com `desde` e `ate` (vigente = `ate` nulo). Unidade já agrupada não muda de grupo.
 - `im_agrupar(p_emp)`: agrupa as unidades ainda sem grupo (as novas entram no grupo aberto que as comporta; as outras passam pela regra só entre elas). O coletor chama ao fim de cada rodada.
 - `im_reagrupar(p_emp)`: encerra os grupos e refaz tudo; a venda antiga fica com o grupo da época (a ligação vigente na data da coleta que a gravou).
+
+## Histórico mensal do Órulo (VSO de dez/2023 a out/2026)
+
+Carga única do relatório "variação 36 meses" que a Órulo entregou à BKM em nov/2026 (decisão do Moisés, 12/nov/2026). Migration `20261112220000_historico_orulo.sql`.
+
+- `im_historico_orulo`: um registro por empreendimento do Órulo por mês, com unidades, estoque no fim do mês, vendas e distratos das tipologias residenciais. Guardado pelo número do Órulo (o de `im_ids_externos`), sem chave para `im_empreendimentos`: quem o monitor ainda não coleta passa a valer quando entrar. Nada do que o monitor coletou muda.
+- `im_vso_historico(p_emp)`: só leitura, aberta a `anon` como a `im_tabela_empreendimento`. Devolve a série mensal, as janelas de 1, 3, 6 e 12 meses e do período todo, os trimestres, semestres e anos e o geral do projeto (vendido ÷ unidades e a média por mês desde o lançamento), com `completo` quando o histórico começa no lançamento.
+- VSO = vendas líquidas ÷ (vendas líquidas + estoque no fim do período), a mesma leitura do monitor. A venda do Órulo é a unidade que saiu da tabela; recarga de tabela vira distrato num mês e venda no seguinte e se anula na líquida. Período com mais distrato que venda fica sem VSO. O VSO pronto do relatório (vendido acumulado ÷ meses) não é usado.
+- VSO mensal equivalente (`vso_mes`, migration `20261112230000_vso_marcos.sql`): 1 − (1 − VSO do período)^(1/meses), em cada janela, trimestre, semestre e ano, no móvel de 3 meses de cada mês (`vso_mes_3m`) e no geral. `vendas` traz os marcos de 25, 50, 75 e 99% vendidos (mês, meses desde o lançamento e VSO mensal equivalente até ali), os quartis de venda (0–25, 25–50, 50–75, 75–100%) com o VSO mensal médio dentro de cada um e o quartil atual; para cada marco, o mês em que o empreendimento chegou lá, quantos meses desde o lançamento e o VSO mensal equivalente até ali; nulo quando a passagem foi antes do histórico.
+- Limites do relatório: sem programa social (vem do monitor), quase nada de São José dos Campos (7 empreendimentos), e o empreendimento lançado antes de dez/2023 não tem a distribuição das vendas anteriores (o geral continua exato).
+
+Carga: `tools/historico_orulo/ler_xlsx.py` e `montar.py` geram o CSV, importado na tabela pelo Table Editor do Supabase.
 
 ## Banco
 
