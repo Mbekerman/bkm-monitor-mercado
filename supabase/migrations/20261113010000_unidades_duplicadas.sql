@@ -14,6 +14,13 @@
 -- estados, as vendas e os grupos dela. Par ambíguo (mais de um candidato) não
 -- se mexe. Depois, os grupos dos empreendimentos tocados são refeitos.
 
+-- Índices das chaves que apontam para a unidade. Sem eles, cada unidade apagada
+-- varre im_vendas, im_unidade_grupos e im_unidades inteiras (on delete cascade
+-- e set null), e a junção não termina.
+create index if not exists im_vendas_unidade on public.im_vendas (unidade_id);
+create index if not exists im_unidade_grupos_unidade on public.im_unidade_grupos (unidade_id);
+create index if not exists im_unidades_vinculo on public.im_unidades (vinculo_pendente_id) where vinculo_pendente_id is not null;
+
 create temp table _im_dup as
 with u as (
   select x.id, x.empreendimento_id e, x.torre_norm, x.torre, x.numero, x.numero_norm, x.andar,
