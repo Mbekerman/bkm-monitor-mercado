@@ -45,8 +45,8 @@ select pg_temp.ok(not exists (
   join pg_class c on c.oid = t.tgrelid
   join pg_namespace n on n.oid = c.relnamespace
   where n.nspname = 'auth' and c.relname = 'users' and not t.tgisinternal), 'não cria trigger em auth.users');
-select pg_temp.ok((select count(*) = 17 from pg_class c join pg_namespace n on n.oid = c.relnamespace
-  where n.nspname = 'public' and c.relkind = 'r' and c.relname like 'im_%'), 'dezessete tabelas im_');
+select pg_temp.ok((select count(*) = 19 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relkind = 'r' and c.relname like 'im_%'), 'dezenove tabelas im_');
 select pg_temp.ok((select public = false from storage.buckets where id = 'im-bruto'), 'bucket im-bruto é privado');
 select pg_temp.ok(not exists (
   select 1 from pg_policy pol
@@ -667,6 +667,25 @@ select pg_temp.falha($$select 1 from public.im_tabelas_preco$$, 'anon não lê a
 set role authenticated;
 select pg_temp.ok((select count(*) >= 1 from public.im_tabelas_preco), 'authenticated lê a tabela de preços');
 select pg_temp.falha($$select public.im_registrar_tabela_preco('{}'::jsonb)$$, 'authenticated não grava a tabela');
+set role postgres;
+
+\echo '# histórico do Órulo por tipologia'
+insert into public.im_historico_orulo_empreendimentos (orulo_id, nome, municipio, uf, lat, lon, unidades, lancamento)
+  values (999100, 'Teste Tipologias', 'São Paulo', 'SP', -23.55, -46.63, 120, '2025-01-10');
+insert into public.im_historico_orulo_tipologias (orulo_tid, orulo_id, mes, situacao, area_privativa, dormitorios, unidades, estoque, vendas, distratos, preco_m2) values
+  (1, 999100, '2025-01-01', 'lancamento', 30.5, 1, 60, 40, 0, 0, 9000),
+  (1, 999100, '2025-02-01', 'lancamento', 30.5, 1, 60, 35, 5, 0, 9100),
+  (2, 999100, '2025-01-01', 'lancamento', 45, 2, 60, 50, 0, 0, 8500);
+select pg_temp.ok((select sum(vendas) = 5 from public.im_historico_orulo_tipologias where orulo_id = 999100), 'grava tipologia por mês');
+select pg_temp.falha($$insert into public.im_historico_orulo_tipologias (orulo_tid, orulo_id, mes, estoque, vendas, distratos) values (3, 999100, '2025-01-15', 1, 0, 0)$$, 'mês da tipologia tem que ser o dia 1');
+select pg_temp.falha($$insert into public.im_historico_orulo_tipologias (orulo_tid, orulo_id, mes, estoque, vendas, distratos) values (3, 1, '2025-01-01', 1, 0, 0)$$, 'tipologia precisa do empreendimento');
+select pg_temp.falha($$insert into public.im_historico_orulo_tipologias (orulo_tid, orulo_id, mes, estoque, vendas, distratos) values (1, 999100, '2025-01-01', 1, 0, 0)$$, 'uma linha por tipologia e mês');
+set role anon;
+select pg_temp.falha($$select 1 from public.im_historico_orulo_tipologias$$, 'anon não lê as tipologias');
+select pg_temp.falha($$select 1 from public.im_historico_orulo_empreendimentos$$, 'anon não lê os empreendimentos do histórico');
+set role authenticated;
+select pg_temp.ok((select count(*) = 3 from public.im_historico_orulo_tipologias where orulo_id = 999100), 'authenticated lê as tipologias');
+select pg_temp.falha($$insert into public.im_historico_orulo_empreendimentos (orulo_id, nome, municipio, uf, lat, lon) values (2, 'x', 'x', 'SP', 0, 0)$$, 'authenticated não grava');
 set role postgres;
 
 \echo 'TODOS OS TESTES PASSARAM'
