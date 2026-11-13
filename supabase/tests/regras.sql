@@ -45,8 +45,8 @@ select pg_temp.ok(not exists (
   join pg_class c on c.oid = t.tgrelid
   join pg_namespace n on n.oid = c.relnamespace
   where n.nspname = 'auth' and c.relname = 'users' and not t.tgisinternal), 'não cria trigger em auth.users');
-select pg_temp.ok((select count(*) = 19 from pg_class c join pg_namespace n on n.oid = c.relnamespace
-  where n.nspname = 'public' and c.relkind = 'r' and c.relname like 'im_%'), 'dezenove tabelas im_');
+select pg_temp.ok((select count(*) = 22 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relkind = 'r' and c.relname like 'im_%'), 'vinte e duas tabelas im_');
 select pg_temp.ok((select public = false from storage.buckets where id = 'im-bruto'), 'bucket im-bruto é privado');
 select pg_temp.ok(not exists (
   select 1 from pg_policy pol
@@ -686,6 +686,50 @@ select pg_temp.falha($$select 1 from public.im_historico_orulo_empreendimentos$$
 set role authenticated;
 select pg_temp.ok((select count(*) = 3 from public.im_historico_orulo_tipologias where orulo_id = 999100), 'authenticated lê as tipologias');
 select pg_temp.falha($$insert into public.im_historico_orulo_empreendimentos (orulo_id, nome, municipio, uf, lat, lon) values (2, 'x', 'x', 'SP', 0, 0)$$, 'authenticated não grava');
+set role postgres;
+
+\echo '# processos de licenciamento e conferência das unidades'
+insert into public.im_historico_orulo_empreendimentos (orulo_id, nome, municipio, uf, lat, lon, unidades, entrega) values
+  (999201, 'A', 'São Paulo', 'SP', -23.5, -46.6, 120, '2027-01-01'),
+  (999202, 'B', 'São Paulo', 'SP', -23.5, -46.6, 60, '2027-01-01'),
+  (999203, 'C', 'São Paulo', 'SP', -23.5, -46.6, 50, '2027-01-01'),
+  (999204, 'D', 'São Paulo', 'SP', -23.5, -46.6, 50, null),
+  (999205, 'E', 'São Paulo', 'SP', -23.5, -46.6, 50, null),
+  (999206, 'F', 'São Paulo', 'SP', -23.5, -46.6, 102, null),
+  (999207, 'G', 'São Paulo', 'SP', -23.5, -46.6, 40, '2022-01-01');
+insert into public.im_licenciamento_processos (processo, data_autuacao, assunto, unidades, his, lotes) values
+  ('P1', '2021-01-10', 'Alvará de Aprovação de Edificação Nova', 100, false, '{0010010001,0010010002}'),
+  ('P2', '2022-03-10', 'Alvará de Execução de Edificação Nova', 100, true, '{0010010001}'),
+  ('P3', '2021-05-01', 'Alvará de Aprovação e Execução de Edificação Nova', 80, false, '{0020020005,0020020006}'),
+  ('P4', '2021-05-01', 'Alvará de Aprovação e Execução de Edificação Nova', 30, false, '{0030030005}'),
+  ('P5', '2022-05-01', 'Alvará de Aprovação e Execução de Edificação Nova', 40, false, '{0030030009}'),
+  ('P6', '2023-05-01', 'Alvará de Aprovação e Execução de Edificação Nova', 100, false, '{0060060001}'),
+  ('P7', '2023-05-01', 'Alvará de Aprovação e Execução de Edificação Nova', 40, false, '{0070070005}');
+insert into public.im_empreendimento_lotes (orulo_id, lote, distancia_m) values
+  (999201, '0010010001', 0), (999202, '0020020000', 0), (999203, '0030030000', 0),
+  (999204, '0040040001', 0), (999205, null, null), (999206, '0060060001', 0), (999207, '0070070000', 0);
+select pg_temp.falha($$insert into public.im_empreendimento_lotes (orulo_id, lote) values (1, '123')$$, 'lote tem 10 dígitos');
+select public.im_conferir_unidades();
+select pg_temp.ok((select situacao = 'suspeito' and processo = 'P2' and unidades_processo = 100 and por_lote_exato and his
+  from public.im_conferencia_unidades where orulo_id = 999201), 'Órulo acima do processo é suspeito, pelo mais recente do prédio');
+select pg_temp.ok((select processos = '{P1,P2}' from public.im_conferencia_unidades where orulo_id = 999201),
+  'aprovação e execução do mesmo lote são um prédio só');
+select pg_temp.ok((select situacao = 'fase' and not por_lote_exato from public.im_conferencia_unidades where orulo_id = 999202),
+  'condomínio acha o processo pela quadra; Órulo abaixo é fase');
+select pg_temp.ok((select situacao = 'ambiguo' and processos = '{P4,P5}' from public.im_conferencia_unidades where orulo_id = 999203),
+  'dois prédios na quadra ficam ambíguos');
+select pg_temp.ok((select situacao = 'sem_processo' from public.im_conferencia_unidades where orulo_id = 999204), 'sem processo');
+select pg_temp.ok((select situacao = 'sem_lote' from public.im_conferencia_unidades where orulo_id = 999205), 'sem lote');
+select pg_temp.ok((select situacao = 'conferido' from public.im_conferencia_unidades where orulo_id = 999206), 'dentro de 5% confere');
+select pg_temp.ok((select situacao = 'sem_processo' from public.im_conferencia_unidades where orulo_id = 999207),
+  'pela quadra, processo autuado depois da entrega é de outro prédio');
+select pg_temp.ok(public._im_quadras('{0010010001,0010010002,0020020001}') = '{001001,002002}', 'quadras dos lotes');
+set role anon;
+select pg_temp.falha($$select 1 from public.im_conferencia_unidades$$, 'anon não lê a conferência');
+select pg_temp.falha($$select public.im_conferir_unidades()$$, 'anon não refaz a conferência');
+set role authenticated;
+select pg_temp.ok((select count(*) = 7 from public.im_conferencia_unidades where orulo_id between 999201 and 999207), 'authenticated lê a conferência');
+select pg_temp.falha($$select public.im_conferir_unidades()$$, 'authenticated não refaz a conferência');
 set role postgres;
 
 \echo 'TODOS OS TESTES PASSARAM'
