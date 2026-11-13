@@ -12,19 +12,16 @@
 -- Só em São Paulo.
 --
 -- Como acha o processo: o lote fiscal que contém o ponto do empreendimento (ou o mais próximo a
--- até 30 m), consultado no GeoSampa (tools/licenciamento/lotes.py). Prédio pronto vira condomínio
--- (lote 0000) e o processo continua com os lotes antigos; por isso a busca vai à quadra:
---   1. com o lote exato num processo, valem os processos ligados a ele;
---   2. senão, os processos com lote na mesma quadra, autuados até a entrega do empreendimento.
--- Processos que dividem algum lote são o mesmo prédio (aprovação, execução, modificativo) e valem
--- pelo mais recente. Mais de um prédio candidato na quadra fica "ambiguo", sem escolher pelo número
--- de unidades (escolher pelo número tornaria a conferência circular).
-
-create or replace function public._im_quadras(p_lotes text[])
-returns text[] language sql immutable parallel safe
-set search_path = '' as $$
-  select coalesce(array_agg(distinct left(x, 6)), '{}') from unnest(p_lotes) x
-$$;
+-- até 30 m), consultado no GeoSampa (tools/licenciamento/lotes.py). Só vale o lote exato: o prédio
+-- pronto vira condomínio (lote 0000) e a busca pela quadra, testada com os dados de nov/2026, casava
+-- prédios errados (fica "sem_processo"). Processos ligados por lote em comum são o mesmo prédio
+-- (aprovação, execução, modificativos) e valem pelo de mais unidades (o mais recente às vezes é um
+-- modificativo pequeno). O Órulo divide o projeto em "- Residencial", "- NR", "- Lojas", "Fase 1/2":
+-- os residenciais do mesmo prédio são somados e os não residenciais ficam de fora, porque o processo
+-- conta só unidades residenciais.
+--
+-- Suspeito NÃO sai do VSO por enquanto (decisão pendente do Moisés): projeto em vários lotes pode
+-- ter um processo por lote, e aqui só se vê o do lote do ponto.
 
 create table public.im_licenciamento_processos (
   processo           text primary key,
@@ -50,7 +47,6 @@ create table public.im_licenciamento_processos (
   carregado_em       timestamptz not null default now()
 );
 create index im_lic_lotes on public.im_licenciamento_processos using gin (lotes);
-create index im_lic_quadras on public.im_licenciamento_processos using gin (public._im_quadras(lotes));
 comment on table public.im_licenciamento_processos is
   'Processos de edificação nova do Aprova Digital (SP), com as unidades pedidas. Não são alvarás emitidos.';
 
@@ -67,54 +63,71 @@ comment on table public.im_empreendimento_lotes is
 -- Resultado da conferência, refeito por im_conferir_unidades().
 create table public.im_conferencia_unidades (
   orulo_id          integer primary key,
-  situacao          text not null check (situacao in ('conferido','suspeito','fase','sem_processo','ambiguo','sem_lote')),
-  unidades_orulo    integer,
+  situacao          text not null check (situacao in
+                      ('conferido','suspeito','fase','sem_processo','sem_lote','nao_residencial')),
+  unidades_orulo    integer,         -- residenciais do empreendimento
+  unidades_predio   integer,         -- soma dos empreendimentos residenciais do Órulo no mesmo prédio
   unidades_processo integer,
-  processo          text,            -- o mais recente do prédio
+  processo          text,            -- o de mais unidades do prédio
   processos         text[],          -- todos os do prédio (aprovação, execução, modificativos)
   data_processo     date,
-  por_lote_exato    boolean,         -- true: o lote do ponto está no processo; false: achado pela quadra
   his               boolean,
   hmp               boolean,
   r2v               boolean,
   conferido_em      timestamptz not null default now()
 );
 comment on table public.im_conferencia_unidades is
-  'Unidades do Órulo × processo de licenciamento (SP). suspeito = Órulo acima do processo + 5%; fase = abaixo − 5%.';
+  'Unidades residenciais do Órulo × processo de licenciamento (SP), pelo lote do ponto. suspeito = Órulo acima do processo + 5%; fase = abaixo − 5%.';
 
--- Unidades do Órulo: as do monitor quando o empreendimento é coletado, senão as do histórico.
+-- Nome de parte não residencial do projeto no Órulo ("Edifício X - NR", "- Lojas", "- Comercial").
+create or replace function public._im_nome_nao_residencial(p_nome text)
+returns boolean language sql immutable
+set search_path = '' as $$
+  select coalesce(p_nome ~* '-\s*(NR|Lojas?|Comercial|Corporate|Office|Mall)\s*$', false)
+$$;
+
+-- Unidades residenciais do Órulo: pelo histórico (última situação de cada tipologia residencial);
+-- sem histórico, pelas unidades residenciais coletadas pelo monitor; sem as duas, o total do empreendimento.
 create or replace function public._im_unidades_orulo(p_orulo integer)
 returns integer language sql stable
 set search_path = '' as $$
   select coalesce(
-    (select e.unidades from public.im_ids_externos x join public.im_empreendimentos e on e.id = x.entidade_id
+    (select round(sum(t.unidades))::integer from (
+        select distinct on (orulo_tid) unidades, finalidade from public.im_historico_orulo_tipologias
+         where orulo_id = p_orulo order by orulo_tid, mes desc) t
+      where t.finalidade = 'Residencial'),
+    (select nullif(count(*), 0)::integer from public.im_ids_externos x
+       join public.im_unidades u on u.empreendimento_id = x.entidade_id
       where x.entidade = 'empreendimento' and x.fonte like 'orulo%' and x.id_externo = p_orulo::text
-      order by e.unidades desc nulls last limit 1),
+        and u.residencial),
     (select round(h.unidades)::integer from public.im_historico_orulo_empreendimentos h where h.orulo_id = p_orulo))
 $$;
 
--- Entrega prevista ou real, para não casar com processo de outro prédio autuado depois.
-create or replace function public._im_entrega_orulo(p_orulo integer)
-returns date language sql stable
+create or replace function public._im_nome_orulo(p_orulo integer)
+returns text language sql stable
 set search_path = '' as $$
   select coalesce(
-    (select max(e.previsao_entrega) from public.im_ids_externos x join public.im_empreendimentos e on e.id = x.entidade_id
-      where x.entidade = 'empreendimento' and x.fonte like 'orulo%' and x.id_externo = p_orulo::text),
-    (select h.entrega from public.im_historico_orulo_empreendimentos h where h.orulo_id = p_orulo))
+    (select h.nome from public.im_historico_orulo_empreendimentos h where h.orulo_id = p_orulo),
+    (select e.nome from public.im_ids_externos x join public.im_empreendimentos e on e.id = x.entidade_id
+      where x.entidade = 'empreendimento' and x.fonte like 'orulo%' and x.id_externo = p_orulo::text limit 1))
 $$;
 
-create or replace function public.im_conferir_unidade(p_orulo integer)
+-- Primeira passada de um empreendimento: acha o prédio e grava as unidades dele.
+create or replace function public._im_conferir_um(p_orulo integer)
 returns void language plpgsql security definer
 set search_path = '' as $$
 declare
-  v_lote text; v_exato boolean; v_n_predios int; v_proc record;
+  v_lote text; v_proc record; v_procs text[];
   v_uo integer := public._im_unidades_orulo(p_orulo);
-  v_entrega date := public._im_entrega_orulo(p_orulo);
-  v_sit text; v_procs text[];
 begin
   delete from public.im_conferencia_unidades where orulo_id = p_orulo;
   if not exists (select 1 from public.im_empreendimento_lotes where orulo_id = p_orulo) then
     return;  -- lote não consultado (fora de São Paulo)
+  end if;
+  if public._im_nome_orulo(p_orulo) is not null and public._im_nome_nao_residencial(public._im_nome_orulo(p_orulo))
+     or v_uo = 0 then
+    insert into public.im_conferencia_unidades (orulo_id, situacao, unidades_orulo) values (p_orulo, 'nao_residencial', v_uo);
+    return;
   end if;
   select lote into v_lote from public.im_empreendimento_lotes where orulo_id = p_orulo;
   if v_lote is null then
@@ -122,58 +135,49 @@ begin
     return;
   end if;
 
-  create temp table if not exists _im_cand (processo text primary key, lotes text[], data_autuacao date, unidades int,
-    his boolean, hmp boolean, r2v boolean) on commit drop;
-  truncate pg_temp._im_cand;
-  v_exato := exists (select 1 from public.im_licenciamento_processos p
-                      where p.lotes @> array[v_lote] and coalesce(p.unidades, 0) > 0);
-  if v_exato then
-    insert into pg_temp._im_cand
-      select p.processo, p.lotes, p.data_autuacao, p.unidades, p.his, p.hmp, p.r2v
-        from public.im_licenciamento_processos p
-       where p.lotes && (select coalesce(array_agg(distinct l), '{}') from public.im_licenciamento_processos q, unnest(q.lotes) l
-                          where q.lotes @> array[v_lote] and coalesce(q.unidades, 0) > 0)
-         and coalesce(p.unidades, 0) > 0;
-  else
-    insert into pg_temp._im_cand
-      select p.processo, p.lotes, p.data_autuacao, p.unidades, p.his, p.hmp, p.r2v
-        from public.im_licenciamento_processos p
-       where public._im_quadras(p.lotes) @> array[left(v_lote, 6)]
-         and coalesce(p.unidades, 0) > 0
-         and (v_entrega is null or p.data_autuacao is null or p.data_autuacao <= v_entrega);
-  end if;
-
-  -- prédios = grupos de processos ligados por lote em comum
-  with recursive arestas as (
-    select a.processo a, b.processo b from pg_temp._im_cand a join pg_temp._im_cand b on a.lotes && b.lotes),
-  r (p, raiz) as (
-    select processo, processo from pg_temp._im_cand
+  -- o prédio: os processos com unidades ligados ao lote, direta ou indiretamente, por lote em comum
+  with recursive r (processo, lotes) as (
+    select p.processo, p.lotes from public.im_licenciamento_processos p
+     where p.lotes @> array[v_lote] and coalesce(p.unidades, 0) > 0
     union
-    select arestas.b, r.raiz from r join arestas on arestas.a = r.p)
-  select count(distinct raiz) into v_n_predios
-    from (select p, min(raiz) raiz from r group by p) g;
+    select p.processo, p.lotes from public.im_licenciamento_processos p join r on p.lotes && r.lotes
+     where coalesce(p.unidades, 0) > 0)
+  select array_agg(distinct processo order by processo) into v_procs from r;
 
-  if v_n_predios = 0 then
-    insert into public.im_conferencia_unidades (orulo_id, situacao, unidades_orulo, por_lote_exato)
-      values (p_orulo, 'sem_processo', v_uo, false);
-    return;
-  elsif v_n_predios > 1 then
-    insert into public.im_conferencia_unidades (orulo_id, situacao, unidades_orulo, processos, por_lote_exato)
-      values (p_orulo, 'ambiguo', v_uo, (select array_agg(processo order by data_autuacao) from pg_temp._im_cand), v_exato);
+  if v_procs is null then
+    insert into public.im_conferencia_unidades (orulo_id, situacao, unidades_orulo) values (p_orulo, 'sem_processo', v_uo);
     return;
   end if;
-
-  select * into v_proc from pg_temp._im_cand order by data_autuacao desc nulls last, processo desc limit 1;
-  select array_agg(processo order by data_autuacao) into v_procs from pg_temp._im_cand;
-  v_sit := case
-    when v_uo is null then 'sem_processo'
-    when v_uo > v_proc.unidades * 1.05 then 'suspeito'
-    when v_uo < v_proc.unidades * 0.95 then 'fase'
-    else 'conferido' end;
+  select * into v_proc from public.im_licenciamento_processos
+   where processo = any (v_procs) order by unidades desc, data_autuacao desc nulls last limit 1;
   insert into public.im_conferencia_unidades (orulo_id, situacao, unidades_orulo, unidades_processo, processo, processos,
-                                              data_processo, por_lote_exato, his, hmp, r2v)
-    values (p_orulo, v_sit, v_uo, v_proc.unidades, v_proc.processo, v_procs, v_proc.data_autuacao, v_exato,
+                                              data_processo, his, hmp, r2v)
+    values (p_orulo, 'conferido', v_uo, v_proc.unidades, v_proc.processo, v_procs, v_proc.data_autuacao,
             v_proc.his, v_proc.hmp, v_proc.r2v);
+end $$;
+
+-- Segunda passada: soma os empreendimentos do mesmo prédio e decide a situação.
+create or replace function public._im_situacao_predios()
+returns void language sql security definer
+set search_path = '' as $$
+  with p as (
+    select processos, sum(unidades_orulo) soma from public.im_conferencia_unidades
+     where processos is not null group by processos)
+  update public.im_conferencia_unidades c set
+    unidades_predio = p.soma,
+    situacao = case when p.soma > c.unidades_processo * 1.05 then 'suspeito'
+                    when p.soma < c.unidades_processo * 0.95 then 'fase'
+                    else 'conferido' end
+  from p where c.processos = p.processos;
+$$;
+
+-- Confere um empreendimento (e refaz o prédio dele).
+create or replace function public.im_conferir_unidade(p_orulo integer)
+returns void language plpgsql security definer
+set search_path = '' as $$
+begin
+  perform public._im_conferir_um(p_orulo);
+  perform public._im_situacao_predios();
 end $$;
 
 -- Refaz a conferência de todos os empreendimentos com lote consultado.
@@ -183,8 +187,9 @@ set search_path = '' as $$
 declare v_id integer;
 begin
   for v_id in select orulo_id from public.im_empreendimento_lotes loop
-    perform public.im_conferir_unidade(v_id);
+    perform public._im_conferir_um(v_id);
   end loop;
+  perform public._im_situacao_predios();
   return (select json_object_agg(situacao, n) from
           (select situacao, count(*) n from public.im_conferencia_unidades group by situacao) s);
 end $$;
@@ -202,7 +207,9 @@ create policy im_leitura on public.im_licenciamento_processos for select to auth
 create policy im_leitura on public.im_empreendimento_lotes for select to authenticated using (true);
 create policy im_leitura on public.im_conferencia_unidades for select to authenticated using (true);
 
-revoke all on function public._im_unidades_orulo(integer), public._im_entrega_orulo(integer),
+revoke all on function public._im_nome_nao_residencial(text), public._im_unidades_orulo(integer),
+  public._im_nome_orulo(integer), public._im_conferir_um(integer), public._im_situacao_predios(),
   public.im_conferir_unidade(integer), public.im_conferir_unidades() from public, anon, authenticated;
-grant execute on function public._im_unidades_orulo(integer), public._im_entrega_orulo(integer),
+grant execute on function public._im_nome_nao_residencial(text), public._im_unidades_orulo(integer),
+  public._im_nome_orulo(integer), public._im_conferir_um(integer), public._im_situacao_predios(),
   public.im_conferir_unidade(integer), public.im_conferir_unidades() to service_role;
