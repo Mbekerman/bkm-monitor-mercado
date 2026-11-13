@@ -735,4 +735,17 @@ select pg_temp.ok((select count(*) = 8 from public.im_conferencia_unidades where
 select pg_temp.falha($$select public.im_conferir_unidades()$$, 'authenticated não refaz a conferência');
 set role postgres;
 
+-- Usuário só de leitura do serviço de inteligência de mercado
+select pg_temp.ok((select not rolcanlogin from pg_roles where rolname = 'im_leitor'), 'im_leitor nasce sem login');
+select pg_temp.ok((select count(*) = 0 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                    where n.nspname = 'public' and c.relkind = 'r' and c.relname like 'im\_%'
+                      and not has_table_privilege('im_leitor', c.oid, 'select')), 'im_leitor lê todas as tabelas im_*');
+set role im_leitor;
+select pg_temp.ok((select count(*) = 8 from public.im_conferencia_unidades where orulo_id between 999201 and 999209), 'im_leitor passa pela RLS');
+select pg_temp.ok((select count(*) > 0 from public.im_historico_orulo_tipologias), 'im_leitor lê o histórico');
+select pg_temp.falha($$insert into public.im_conferencia_unidades (orulo_id, situacao) values (1, 'sem_lote')$$, 'im_leitor não escreve');
+select pg_temp.falha($$delete from public.im_coletas$$, 'im_leitor não apaga');
+select pg_temp.falha($$select public.im_conferir_unidades()$$, 'im_leitor não refaz a conferência');
+set role postgres;
+
 \echo 'TODOS OS TESTES PASSARAM'
