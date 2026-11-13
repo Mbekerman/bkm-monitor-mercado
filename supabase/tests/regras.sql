@@ -45,8 +45,8 @@ select pg_temp.ok(not exists (
   join pg_class c on c.oid = t.tgrelid
   join pg_namespace n on n.oid = c.relnamespace
   where n.nspname = 'auth' and c.relname = 'users' and not t.tgisinternal), 'não cria trigger em auth.users');
-select pg_temp.ok((select count(*) = 16 from pg_class c join pg_namespace n on n.oid = c.relnamespace
-  where n.nspname = 'public' and c.relkind = 'r' and c.relname like 'im_%'), 'dezesseis tabelas im_');
+select pg_temp.ok((select count(*) = 17 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relkind = 'r' and c.relname like 'im_%'), 'dezessete tabelas im_');
 select pg_temp.ok((select public = false from storage.buckets where id = 'im-bruto'), 'bucket im-bruto é privado');
 select pg_temp.ok(not exists (
   select 1 from pg_policy pol
@@ -603,6 +603,70 @@ select pg_temp.falha($$select 1 from public.im_historico_orulo$$, 'anon não lê
 select pg_temp.falha($$select public._im_vso_orulo(999001, '2026-01-01', '2026-02-01')$$, 'anon não chama a função interna');
 set role authenticated;
 select pg_temp.falha($$insert into public.im_historico_orulo (orulo_id, mes, unidades, estoque, vendas, distratos) values (2, '2026-01-01', 1, 1, 0, 0)$$, 'authenticated não grava');
+set role postgres;
+
+\echo '# categoria social (tabela de preços)'
+insert into public.im_ids_externos (entidade, entidade_id, fonte, id_externo)
+  values ('empreendimento', pg_temp.emp('g-area'), 'orulo_login', '88001');
+select pg_temp.ok((
+  select bool_or(x->>'id_externo' = '88001')
+  from jsonb_array_elements(public.im_tabelas_pendentes(array['São Paulo'])) x
+), 'empreendimento sem tabela entra nos pendentes');
+select id as u_cat from public.im_unidades
+ where empreendimento_id = pg_temp.emp('g-area') and numero = '1' \gset
+select id as u_man from public.im_unidades
+ where empreendimento_id = pg_temp.emp('g-area') and numero = '2' \gset
+update public.im_unidades
+   set categoria_social = 'hmp', categoria_social_fonte = 'manual', categoria_social_em = now()
+ where id = :'u_man';
+select pg_temp.ok((
+  select bool_or(x->>'numero' = '1' and x->>'categoria_social_fonte' is null)
+  from jsonb_array_elements(public.im_unidades_para_tabela(pg_temp.emp('g-area'))) x
+), 'unidades para a tabela trazem o número e a fonte ainda vazia');
+select public.im_registrar_tabela_preco(jsonb_build_object(
+  'empreendimento_id', pg_temp.emp('g-area'), 'id_externo', '88001',
+  'arquivo_id', '42', 'arquivo_nome', 'tabela_area_novembro_2026.pdf',
+  'referencia', '2026-11-01', 'status', 'ok', 'metodo_texto', 'pdftotext', 'paginas', 2,
+  'resto_fonte', 'fora_da_tabela',
+  'unidades', jsonb_build_array(jsonb_build_object(
+    'id', :'u_cat', 'categoria', 'his2', 'fonte', 'tabela_unidade')))) as reg_cat \gset
+select pg_temp.ok((:'reg_cat'::jsonb->>'tabela_unidade')::int = 1, 'registra a unidade casada');
+select pg_temp.ok((select categoria_social = 'his2' and categoria_social_fonte = 'tabela_unidade'
+  from public.im_unidades where id = :'u_cat'), 'unidade da tabela fica HIS2');
+select pg_temp.ok((select categoria_social = 'hmp' and categoria_social_fonte = 'manual'
+  from public.im_unidades where id = :'u_man'), 'fonte manual não é sobrescrita');
+select pg_temp.ok((select count(*) = 7 from public.im_unidades
+  where empreendimento_id = pg_temp.emp('g-area')
+    and categoria_social = 'nao_informado' and categoria_social_fonte = 'fora_da_tabela'),
+  'unidade fora da tabela fica nao_informado');
+select public.im_registrar_tabela_preco(jsonb_build_object(
+  'empreendimento_id', pg_temp.emp('g-area'), 'id_externo', '88001', 'arquivo_id', '42',
+  'arquivo_nome', 'tabela_area_novembro_2026.pdf', 'status', 'ok', 'resto_fonte', 'fora_da_tabela',
+  'unidades', jsonb_build_array(jsonb_build_object(
+    'id', :'u_cat', 'categoria', 'his1', 'fonte', 'tabela_unidade'))));
+select pg_temp.ok((select count(*) = 1 from public.im_tabelas_preco
+  where empreendimento_id = pg_temp.emp('g-area') and arquivo_id = '42'),
+  'a mesma tabela atualiza a linha, sem duplicar');
+select pg_temp.ok((select categoria_social = 'his1' from public.im_unidades where id = :'u_cat'),
+  'reprocessar a tabela atualiza a categoria');
+select public.im_registrar_tabela_preco(jsonb_build_object(
+  'empreendimento_id', pg_temp.emp('g-area'), 'id_externo', '88001', 'arquivo_id', '99',
+  'status', 'erro', 'resto_fonte', 'fora_da_tabela', 'detalhe', 'falha de leitura'));
+select pg_temp.ok((select categoria_social = 'his1' and categoria_social_fonte = 'tabela_unidade'
+    from public.im_unidades where id = :'u_cat')
+  and (select status = 'erro' from public.im_tabelas_preco
+       where empreendimento_id = pg_temp.emp('g-area') and arquivo_id = '99'),
+  'status erro só registra a linha');
+select pg_temp.ok(not coalesce((select bool_or(x->>'id_externo' = '88001')
+  from jsonb_array_elements(public.im_tabelas_pendentes(array['São Paulo'])) x), false),
+  'tabela ok tira o empreendimento dos pendentes');
+set role anon;
+select pg_temp.falha($$select public.im_registrar_tabela_preco('{}'::jsonb)$$, 'anon não grava a tabela');
+select pg_temp.falha($$select public.im_tabelas_pendentes()$$, 'anon não lista pendentes');
+select pg_temp.falha($$select 1 from public.im_tabelas_preco$$, 'anon não lê a tabela de preços');
+set role authenticated;
+select pg_temp.ok((select count(*) >= 1 from public.im_tabelas_preco), 'authenticated lê a tabela de preços');
+select pg_temp.falha($$select public.im_registrar_tabela_preco('{}'::jsonb)$$, 'authenticated não grava a tabela');
 set role postgres;
 
 \echo 'TODOS OS TESTES PASSARAM'
