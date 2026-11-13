@@ -458,7 +458,56 @@ def mapear_empreendimento(lista: dict | None, detalhe: dict | None, unidades: li
         uns = [u for u in (unidades or []) if isinstance(u, dict)]
         maximo = andar_maximo(bruto)
         informadas = vagas_informadas(bruto, uns)
-        emp["unidades"] = [
+        emp["unidades"] = juntar_duplicadas([
             mapear_unidade(u, tips, andar_max=maximo, vagas_cadastradas=informadas) for u in uns
-        ]
+        ])
     return emp
+
+
+_A_VENDA = ("disponivel", "reservada")
+
+
+def _rotulo_cru(v) -> str:
+    """Torre ou número em maiúsculas, sem acento, espaço nem pontuação."""
+    s = unicodedata.normalize("NFKD", str(v or ""))
+    return re.sub(r"[^A-Z0-9]", "", "".join(c for c in s if not unicodedata.combining(c)).upper())
+
+
+def juntar_duplicadas(unidades: list[dict]) -> list[dict]:
+    """Junta a unidade que o Órulo manda duas vezes.
+
+    Em parte dos empreendimentos, a lista traz cada unidade com a torre
+    (torre "Bloco 01", número "101") e de novo sem torre, com a torre colada
+    no número ("101Bloco01", "101TA", "101-A"). As duas são a mesma unidade, e
+    no máximo uma delas está à venda. Fica a da torre, com a situação e o preço
+    da que está à venda; os campos vazios dela vêm da outra. Sem par, ou com
+    mais de um par possível, a unidade sem torre fica como veio.
+    """
+    com_torre: dict[str, list[int]] = {}
+    for i, u in enumerate(unidades):
+        t, n = _rotulo_cru(u.get("torre")), _rotulo_cru(u.get("numero"))
+        if t and n:
+            for k in {n + t, t + n}:
+                com_torre.setdefault(k, []).append(i)
+    if not com_torre:
+        return unidades
+    tirar: set[int] = set()
+    usados: set[int] = set()
+    saida = [dict(u) for u in unidades]
+    for i, u in enumerate(unidades):
+        if _rotulo_cru(u.get("torre")):
+            continue
+        pares = com_torre.get(_rotulo_cru(u.get("numero")), [])
+        if len(set(pares)) != 1 or pares[0] in usados:
+            continue
+        j = pares[0]
+        usados.add(j)
+        tirar.add(i)
+        alvo = saida[j]
+        if u.get("situacao") in _A_VENDA and alvo.get("situacao") not in _A_VENDA:
+            for c in ("situacao", "preco", "preco_original"):
+                alvo[c] = u.get(c)
+        for c, v in u.items():
+            if alvo.get(c) is None and v is not None:
+                alvo[c] = v
+    return [u for i, u in enumerate(saida) if i not in tirar]

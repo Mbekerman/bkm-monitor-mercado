@@ -82,3 +82,7 @@ cd tools/coletar && python3 -m pytest -q
 ```
 
 Os testes do coletor usam as amostras `testes/fixtures/` (`detail_83029.json`, `units_83029.json`, `elastic_sample.json`) e HTTP simulado. A rodada ponta a ponta sobe um Postgres 16 temporário e chama as funções reais. Não há pedido ao Órulo nem a um Supabase remoto.
+
+## Unidade repetida pelo Órulo (13/nov/2026)
+
+Em parte dos empreendimentos, a lista de unidades do Órulo traz a mesma unidade duas vezes: com a torre (torre "Bloco 01", número "101") e sem torre, com a torre colada no número ("101Bloco01", "101TA", "101-A"). No máximo uma das duas está à venda. `juntar_duplicadas` (`coletar/mapeamento.py`) junta as duas antes de importar: fica a da torre, com a situação e o preço da que está à venda, e os campos vazios dela vêm da outra. Unidade sem torre sem par, ou com mais de um par possível, segue como veio. Em 13/nov eram 192 empreendimentos e 47,8 mil unidades a mais no banco; a migration `20261113010000_unidades_duplicadas.sql` juntou as que já estavam gravadas e refez os grupos desses empreendimentos. Depois da junção, 151 dos 192 batem com o total do relatório do Órulo (até 2%).
