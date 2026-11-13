@@ -3,9 +3,13 @@ name = "coletar"
 version = "0.1.0"
 description = "Coletor do monitor de mercado da BKM"
 requires-python = ">=3.11"
-dependencies = ["httpx>=0.27", "openpyxl>=3.1"]
+dependencies = ["httpx>=0.27", "openpyxl>=3.1", "pymupdf>=1.24"]
+
 
 [project.optional-dependencies]
+# OCR das tabelas de preço em imagem (a imagem do job instala; sem ele, só a camada de texto do PDF).
+# rapidocr puxa opencv-python, que precisa de libgl1 e libglib2.0-0 (Dockerfile).
+ocr = ["rapidocr-onnxruntime==1.2.3", "onnxruntime>=1.17"]
 teste = ["pytest>=8", "psycopg[binary]>=3.2"]
 
 [project.scripts]

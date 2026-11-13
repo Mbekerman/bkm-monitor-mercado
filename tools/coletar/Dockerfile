@@ -3,9 +3,13 @@
 # Não faz deploy sozinho.
 FROM python:3.12-slim
 WORKDIR /app
+# libgl1/libglib2.0-0: o opencv do OCR das tabelas de preço (rapidocr) precisa.
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
 COPY tools/coletar /app
-RUN pip install --no-cache-dir . && chmod +x /app/entrypoint.sh
-ENV PYTHONUNBUFFERED=1
+RUN pip install --no-cache-dir ".[ocr]" && chmod +x /app/entrypoint.sh \
+    && python -c "import pymupdf, rapidocr_onnxruntime"
+ENV PYTHONUNBUFFERED=1 OCR_THREADS=1
 # Exec form: o Cloud Run acrescenta os args do job (vazios na agenda) a este
 # entrypoint. A imagem base traz CMD ["python3"]; ao definir ENTRYPOINT o
 # builder zera esse CMD. Sem isso, o processo seria

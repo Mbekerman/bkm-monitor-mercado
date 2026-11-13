@@ -118,6 +118,38 @@ class OruloLogin:
             return data
         raise OruloError(f"unidades {building_id} em formato inesperado")
 
+    # Tabela de preços: os arquivos só vêm no detalhe logado; o link do PDF
+    # (tabelas.orulo.com.br) sai de um segundo pedido por arquivo.
+    def arquivos(self, building_id) -> list[dict] | None:
+        r = self.http.pedir(
+            "GET", f"{BASE}/api/portal/buildings/{building_id}", auth=True,
+            headers={"Referer": f"{BASE}/buildings/{building_id}"},
+        )
+        if r.status_code == 404:
+            return None
+        if r.status_code != 200:
+            raise OruloError(f"detalhe {building_id} retornou {r.status_code}")
+        return list((r.json() or {}).get("files") or [])
+
+    def url_arquivo(self, building_id, arquivo_id) -> str | None:
+        r = self.http.pedir(
+            "GET", f"{BASE}/api/portal/buildings/{building_id}/files/{arquivo_id}", auth=True,
+            headers={"Referer": f"{BASE}/buildings/{building_id}"},
+        )
+        if r.status_code == 404:
+            return None
+        if r.status_code != 200:
+            raise OruloError(f"arquivo {arquivo_id} retornou {r.status_code}")
+        return (r.json() or {}).get("url")
+
+    def baixar(self, url: str, limite_bytes: int = 60_000_000) -> bytes:
+        r = self.http.pedir("GET", url, follow_redirects=True, headers={"Accept": "application/pdf,*/*"})
+        if r.status_code != 200:
+            raise OruloError(f"PDF retornou {r.status_code}")
+        if len(r.content) > limite_bytes:
+            raise OruloError(f"PDF grande demais ({len(r.content)} bytes)")
+        return r.content
+
     def coletar(self, ctx: ContextoColeta) -> ResultadoFonte:
         emps: list[dict] = []
         itens: list[dict] = []

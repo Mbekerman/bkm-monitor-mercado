@@ -174,6 +174,16 @@ class BancoSupabase:
             raise ColetaErro(f"im_agrupar retornou {r.status_code}: {r.text[:300]}")
         return r.json() if r.text and r.text != "null" else {}
 
+    # Tabelas de preço (categoria social): migration categoria_social.
+    def tabelas_pendentes(self, municipios: list[str] | None, limite: int | None = None) -> list[dict]:
+        return self._rpc("im_tabelas_pendentes", {"p_municipios": municipios, "p_limite": limite}) or []
+
+    def unidades_para_tabela(self, empreendimento_id: str) -> list[dict]:
+        return self._rpc("im_unidades_para_tabela", {"p_emp": empreendimento_id}) or []
+
+    def registrar_tabela_preco(self, dados: dict) -> dict:
+        return self._rpc("im_registrar_tabela_preco", {"p": dados}) or {}
+
     def anotar_falha(self, coleta_id: str, id_externo: str | None, motivo: str, detalhe: str) -> None:
         self._rpc("im_anotar_falha", {
             "p_coleta": coleta_id,
@@ -266,6 +276,24 @@ class BancoPostgres:
 
     def agrupar(self) -> dict:
         row = self.conn.execute("select public.im_agrupar()").fetchone()
+        return _py(row[0]) or {}
+
+    def tabelas_pendentes(self, municipios: list[str] | None, limite: int | None = None) -> list[dict]:
+        row = self.conn.execute(
+            "select public.im_tabelas_pendentes(%s::text[], 25, %s::int)", (municipios, limite),
+        ).fetchone()
+        return _py(row[0]) or []
+
+    def unidades_para_tabela(self, empreendimento_id: str) -> list[dict]:
+        row = self.conn.execute(
+            "select public.im_unidades_para_tabela(%s::uuid)", (empreendimento_id,),
+        ).fetchone()
+        return _py(row[0]) or []
+
+    def registrar_tabela_preco(self, dados: dict) -> dict:
+        row = self.conn.execute(
+            "select public.im_registrar_tabela_preco(%s::jsonb)", (Jsonb(dados),),
+        ).fetchone()
         return _py(row[0]) or {}
 
     def anotar_falha(self, coleta_id: str, id_externo: str | None, motivo: str, detalhe: str) -> None:

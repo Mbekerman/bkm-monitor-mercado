@@ -165,6 +165,30 @@ def criar_banco():
     )
 
 
+def etapa_tabelas(banco, municipios: list[str]) -> None:
+    """Depois da mensal: tabela de preços (categoria social) só dos empreendimentos novos.
+
+    COLETAR_TABELAS=0 desliga. Espera entre pedidos ao Órulo: TABELAS_ATRASO_MIN/MAX
+    (padrão 3 a 5 s). Falha aqui não muda o resultado da coleta.
+    """
+    log = logging.getLogger("coletar")
+    if os.environ.get("COLETAR_TABELAS", "1").strip() == "0":
+        log.info("tabelas de preço desligadas (COLETAR_TABELAS=0)")
+        return
+    try:
+        from coletar.tabelas import rodar_tabelas
+        try:
+            atraso = (float(os.environ.get("TABELAS_ATRASO_MIN", "3")), float(os.environ.get("TABELAS_ATRASO_MAX", "5")))
+        except ValueError:
+            atraso = (3.0, 5.0)
+        orulo = OruloLogin(
+            email=os.environ.get("ORULO_EMAIL", ""), senha=os.environ.get("ORULO_PASSWORD", ""), atraso=atraso,
+        )
+        rodar_tabelas(banco, orulo, municipios)
+    except Exception as e:  # noqa: BLE001
+        log.warning("AVISO: etapa das tabelas de preço falhou: %s: %s", type(e).__name__, e)
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="coletar", description="Coleta do monitor de mercado")
     p.add_argument(
@@ -198,6 +222,7 @@ def main(argv=None, *, fonte=None, banco=None, agora: datetime | None = None) ->
     tipo = TIPOS[tipo_nome]
     logging.getLogger("coletar").info("referência %s, tipo %s", referencia.isoformat(), tipo_nome)
     proprio_banco = banco is None
+    fonte_propria = fonte is None
     try:
         municipios = municipios_pedidos(args.municipio)
         ids = ids_pedidos(args.id)
@@ -214,6 +239,9 @@ def main(argv=None, *, fonte=None, banco=None, agora: datetime | None = None) ->
             ids=ids,
         )
         resultado = executar(banco, fonte, ctx)
+        if (fonte_propria and args.fonte == "orulo_login" and tipo == "completa_mensal" and not ids
+                and resultado.situacao != "falhou"):
+            etapa_tabelas(banco, [m.nome for m in municipios])
     except httpx.HTTPError as e:
         _marcar_erro_de_rede(banco, e)
         return 1
