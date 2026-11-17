@@ -118,6 +118,14 @@ update public.im_config c
 
 A etapa de tabela de preços (categoria social) continua só para São Paulo, mesmo numa mensal com as 19 cidades. `python -m coletar.tabelas --municipio "São Paulo"` segue igual. Outra cidade nessa flag é ignorada; se nenhuma for São Paulo, o comando sai com 1.
 
+Depois das tabelas, a mensal roda a etapa dos alvarás (`coletar/licenciamento.py`), também só para São Paulo e só quando a rodada inclui a cidade:
+
+1. Lista os extratos do Aprova Digital nos dados abertos da prefeitura (conjunto `ad`, publicação semestral) e baixa só o que é novo ou mudou desde a última carga (`im_licenciamento_extratos`). Grava os processos de edificação nova em `im_licenciamento_processos` (`im_registrar_processos`; o mesmo processo em dois extratos soma os lotes). São processos protocolados, não alvarás emitidos.
+2. Consulta o lote fiscal dos empreendimentos de São Paulo que ainda não têm (`im_lotes_pendentes` → `im_registrar_lotes`), no GeoSampa pelo proxy `/geosampa` do BKM Terrenos, dois pedidos por vez. 403 ou 429 para a consulta e avisa no log; não troca de IP nem de caminho. Erro num empreendimento fica para o mês seguinte.
+3. Refaz a conferência (`im_conferir_unidades`) e leva HIS/HMP do processo para o cadastro (`im_marcar_alvara`): colunas `his_alvara`, `hmp_alvara`, `processo_alvara`, `situacao_alvara` e `alvara_em` de `im_empreendimentos`, para o prédio conferido, em fase ou suspeito cujo processo tem HIS ou HMP. Quem deixa de casar volta a nulo. `programa_social` (do Órulo, chave dos grupos) e `im_unidades.categoria_social` (da tabela de preços) não mudam.
+
+`COLETAR_ALVARAS=0` desliga a etapa. Falha nela não muda o resultado da coleta. À mão: `python -m coletar.licenciamento [--pasta DIR] [--sem-lotes]`. `LICENCIAMENTO_OWS` troca o endereço do proxy do GeoSampa.
+
 Saída 0 quando a coleta fecha completa, 2 quando fica incompleta, 3 quando falha (login), 1 em erro de uso, de configuração ou de rede. Sem `--tipo` e sem `COLETAR_TIPO` válido, ou com `--data` que não seja `AAAA-MM-DD`, sai 1 e não abre coleta: o Cloud Run marca a execução como falha. Flag desconhecida continua saindo 2, pelo argparse. `--help` sai 0 e não coleta; o job não deve receber `--help`, senão a execução fica verde sem ter coletado. Erro de rede (`httpx.HTTPError`, inclusive falha de conexão) marca a coleta aberta como `falhou` e sai com 1, sem traceback.
 
 ## Variáveis
@@ -130,6 +138,8 @@ Saída 0 quando a coleta fecha completa, 2 quando fica incompleta, 3 quando falh
 | `ORULO_ATRASO_MIN`, `ORULO_ATRASO_MAX` | Espera entre pedidos, em segundos. Padrão 2 e 3. |
 | `COLETAR_TIPO` | `mensal` ou `lancamentos`, quando `--tipo` não vem na linha de comando. É o que os jobs do Cloud Run definem. |
 | `COLETAR_UNIDADES_POR_CHAMADA`, `COLETAR_UNIDADES_MINIMO` | Unidades por chamada de `im_importar` (padrão 400) e o menor pedaço (padrão 25). Ver "Importação em partes". |
+| `COLETAR_TABELAS`, `COLETAR_ALVARAS` | `0` desliga a etapa das tabelas de preço ou a dos alvarás depois da mensal. Padrão ligadas. |
+| `LICENCIAMENTO_OWS` | Endereço do proxy do GeoSampa usado na consulta de lotes. Padrão: o do BKM Terrenos. |
 | `COLETAR_PG_DSN`, `COLETAR_BRUTO_DIR` | Só para um Postgres local, no lugar do Supabase. O teste ponta a ponta usa isso por conta própria. |
 
 `orulo_login` espera de 2 a 3 segundos entre pedidos, refaz o login uma vez em 401 e para em 429 ou 403 (a coleta fecha incompleta). O segundo 401 encerra como `falhou`. O client id do site (`CLIENT_ID` no código) é público; não é senha.

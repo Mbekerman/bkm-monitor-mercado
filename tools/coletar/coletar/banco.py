@@ -184,6 +184,36 @@ class BancoSupabase:
     def registrar_tabela_preco(self, dados: dict) -> dict:
         return self._rpc("im_registrar_tabela_preco", {"p": dados}) or {}
 
+    # Alvarás (processos de licenciamento de SP): migration alvara_sistematico.
+    def extratos_carregados(self) -> list[dict]:
+        return self._get("im_licenciamento_extratos", {"select": "recurso_id,nome,modificado_em"}) or []
+
+    def registrar_processos(self, processos: list[dict]) -> int:
+        return self._rpc_longo("im_registrar_processos", {"p": processos}) or 0
+
+    def registrar_extrato(self, dados: dict) -> None:
+        self._rpc("im_registrar_extrato", {"p": dados})
+
+    def lotes_pendentes(self) -> list[dict]:
+        return self._rpc("im_lotes_pendentes", {}) or []
+
+    def registrar_lotes(self, lotes: list[dict]) -> int:
+        return self._rpc("im_registrar_lotes", {"p": lotes}) or 0
+
+    def conferir_unidades(self) -> dict:
+        """im_conferir_unidades tem statement_timeout de 10 min; o cliente espera mais."""
+        return self._rpc_longo("im_conferir_unidades", {}) or {}
+
+    def marcar_alvara(self) -> dict:
+        return self._rpc_longo("im_marcar_alvara", {}) or {}
+
+    def _rpc_longo(self, nome: str, corpo: dict):
+        r = self.http.post(f"{self.url}/rest/v1/rpc/{nome}", headers=self._cabecalhos(), json=corpo,
+                           timeout=httpx.Timeout(30.0, read=FECHAR_LEITURA_S))
+        if r.status_code >= 400:
+            raise ColetaErro(f"{nome} retornou {r.status_code}: {r.text[:300]}")
+        return r.json() if r.text and r.text != "null" else None
+
     def anotar_falha(self, coleta_id: str, id_externo: str | None, motivo: str, detalhe: str) -> None:
         self._rpc("im_anotar_falha", {
             "p_coleta": coleta_id,
@@ -295,6 +325,29 @@ class BancoPostgres:
             "select public.im_registrar_tabela_preco(%s::jsonb)", (Jsonb(dados),),
         ).fetchone()
         return _py(row[0]) or {}
+
+    def extratos_carregados(self) -> list[dict]:
+        rows = self.conn.execute(
+            "select recurso_id, nome, modificado_em::text from public.im_licenciamento_extratos").fetchall()
+        return [{"recurso_id": r[0], "nome": r[1], "modificado_em": r[2]} for r in rows]
+
+    def registrar_processos(self, processos: list[dict]) -> int:
+        return self.conn.execute("select public.im_registrar_processos(%s::jsonb)", (Jsonb(processos),)).fetchone()[0]
+
+    def registrar_extrato(self, dados: dict) -> None:
+        self.conn.execute("select public.im_registrar_extrato(%s::jsonb)", (Jsonb(dados),))
+
+    def lotes_pendentes(self) -> list[dict]:
+        return _py(self.conn.execute("select public.im_lotes_pendentes()").fetchone()[0]) or []
+
+    def registrar_lotes(self, lotes: list[dict]) -> int:
+        return self.conn.execute("select public.im_registrar_lotes(%s::jsonb)", (Jsonb(lotes),)).fetchone()[0]
+
+    def conferir_unidades(self) -> dict:
+        return _py(self.conn.execute("select public.im_conferir_unidades()").fetchone()[0]) or {}
+
+    def marcar_alvara(self) -> dict:
+        return _py(self.conn.execute("select public.im_marcar_alvara()").fetchone()[0]) or {}
 
     def anotar_falha(self, coleta_id: str, id_externo: str | None, motivo: str, detalhe: str) -> None:
         self.conn.execute(

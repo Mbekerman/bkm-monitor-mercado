@@ -45,8 +45,8 @@ select pg_temp.ok(not exists (
   join pg_class c on c.oid = t.tgrelid
   join pg_namespace n on n.oid = c.relnamespace
   where n.nspname = 'auth' and c.relname = 'users' and not t.tgisinternal), 'não cria trigger em auth.users');
-select pg_temp.ok((select count(*) = 22 from pg_class c join pg_namespace n on n.oid = c.relnamespace
-  where n.nspname = 'public' and c.relkind = 'r' and c.relname like 'im_%'), 'vinte e duas tabelas im_');
+select pg_temp.ok((select count(*) = 23 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relkind = 'r' and c.relname like 'im_%'), 'vinte e três tabelas im_');
 select pg_temp.ok((select public = false from storage.buckets where id = 'im-bruto'), 'bucket im-bruto é privado');
 select pg_temp.ok(not exists (
   select 1 from pg_policy pol
@@ -734,6 +734,53 @@ set role authenticated;
 select pg_temp.ok((select count(*) = 8 from public.im_conferencia_unidades where orulo_id between 999201 and 999209), 'authenticated lê a conferência');
 select pg_temp.falha($$select public.im_conferir_unidades()$$, 'authenticated não refaz a conferência');
 set role postgres;
+
+\echo '# alvará sistemático: extratos, lotes pendentes e marcação no empreendimento'
+select pg_temp.ok((select count(*) = 6 from public.im_licenciamento_extratos), 'os seis extratos de 13/nov entram como já carregados');
+insert into public.im_empreendimentos (incorporadora_id, nome, latitude, longitude, situacao, origem, municipio_id, link_fonte, programa_social)
+  values (:'inc_manual', 'Alvara HIS', -23.5, -46.6, 'lancamento', 'importado', :'sp', 'https://www.orulo.com.br/buildings/999201', 'nao')
+  returning id as alv_his \gset
+insert into public.im_empreendimentos (incorporadora_id, nome, latitude, longitude, situacao, origem, municipio_id, link_fonte)
+  values (:'inc_manual', 'Alvara sem social', -23.5, -46.6, 'lancamento', 'importado', :'sp', 'https://www.orulo.com.br/buildings/999206')
+  returning id as alv_nao \gset
+insert into public.im_empreendimentos (incorporadora_id, nome, latitude, longitude, situacao, origem, municipio_id, link_fonte)
+  values (:'inc_manual', 'Sem lote ainda', -23.55, -46.65, 'lancamento', 'importado', :'sp', 'https://www.orulo.com.br/buildings/999777')
+  returning id as alv_novo \gset
+select pg_temp.ok((select public.im_lotes_pendentes() @> '[{"orulo_id": 999777}]'::jsonb
+  and not public.im_lotes_pendentes() @> '[{"orulo_id": 999201}]'::jsonb), 'lote pendente: só quem ainda não foi consultado');
+select pg_temp.ok(public.im_registrar_lotes('[{"orulo_id": 999777, "lote": "0070070001", "distancia_m": 0}]') = 1, 'grava o lote');
+select pg_temp.ok(not public.im_lotes_pendentes() @> '[{"orulo_id": 999777}]'::jsonb, 'gravado, sai dos pendentes');
+select pg_temp.ok(public.im_registrar_processos('[{"processo": "P7", "assunto": "Alvará de Edificação Nova", "unidades": 80,
+  "hmp": true, "lotes": ["0070070001"], "origem": "Extrato X", "data_autuacao": "2026-09-01"}]') = 1, 'grava processo novo');
+select public.im_registrar_processos('[{"processo": "P7", "assunto": "Alvará de Edificação Nova", "unidades": 80,
+  "hmp": true, "lotes": ["0070070009"], "origem": "Extrato Y"}]');
+select pg_temp.ok((select lotes = '{0070070001,0070070009}' and origem = 'Extrato Y' and data_autuacao = '2026-09-01'
+  from public.im_licenciamento_processos where processo = 'P7'), 'mesmo processo em outro extrato: soma os lotes, guarda a data');
+select public.im_registrar_extrato('{"recurso_id": "novo", "nome": "Extrato Y", "url": "http://x", "processos": 1}');
+select pg_temp.ok((select processos = 1 from public.im_licenciamento_extratos where recurso_id = 'novo'), 'grava o extrato');
+select public.im_conferir_unidades();
+select public.im_marcar_alvara() as marca \gset
+select pg_temp.ok((select his_alvara and not hmp_alvara and processo_alvara = 'P1' and situacao_alvara = 'suspeito'
+  and programa_social = 'nao' from public.im_empreendimentos where id = :'alv_his'), 'marca HIS do processo e não mexe em programa_social');
+select pg_temp.ok((select hmp_alvara and situacao_alvara = 'conferido' from public.im_empreendimentos where id = :'alv_novo'),
+  'empreendimento novo com lote e processo HMP é marcado');
+select pg_temp.ok((select his_alvara is null and hmp_alvara is null from public.im_empreendimentos where id = :'alv_nao'),
+  'processo sem HIS/HMP não marca');
+update public.im_licenciamento_processos set his = false where processo = 'P1';
+select public.im_conferir_unidades();
+select public.im_marcar_alvara();
+select pg_temp.ok((select his_alvara is null and processo_alvara is null from public.im_empreendimentos where id = :'alv_his'),
+  'quem deixa de casar volta a nulo');
+select pg_temp.ok((public.im_tabela_empreendimento(:'alv_novo')->'empreendimento'->>'hmp_alvara')::boolean,
+  'a tabela do empreendimento devolve a marcação do alvará');
+set role anon;
+select pg_temp.falha($$select public.im_marcar_alvara()$$, 'anon não marca');
+select pg_temp.falha($$select public.im_lotes_pendentes()$$, 'anon não lista lotes pendentes');
+set role authenticated;
+select pg_temp.falha($$select public.im_registrar_processos('[]')$$, 'authenticated não grava processos');
+select pg_temp.ok((select count(*) >= 6 from public.im_licenciamento_extratos), 'authenticated lê os extratos');
+set role postgres;
+update public.im_licenciamento_processos set his = true where processo = 'P1';
 
 -- Usuário só de leitura do serviço de inteligência de mercado
 select pg_temp.ok((select not rolcanlogin from pg_roles where rolname = 'im_leitor'), 'im_leitor nasce sem login');

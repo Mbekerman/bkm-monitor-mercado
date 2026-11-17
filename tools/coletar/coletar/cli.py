@@ -194,6 +194,26 @@ def etapa_tabelas(banco, municipios: list[str]) -> None:
         log.warning("AVISO: etapa das tabelas de preço falhou: %s: %s", type(e).__name__, e)
 
 
+def etapa_alvaras(banco, municipios: list[str]) -> None:
+    """Depois da mensal: alvarás (processos de licenciamento) de São Paulo e a marcação HIS/HMP.
+
+    Só quando a rodada inclui São Paulo. COLETAR_ALVARAS=0 desliga. Falha aqui não muda o
+    resultado da coleta.
+    """
+    log = logging.getLogger("coletar")
+    if os.environ.get("COLETAR_ALVARAS", "1").strip() == "0":
+        log.info("alvarás desligados (COLETAR_ALVARAS=0)")
+        return
+    if not municipios_para_tabelas(municipios):
+        log.info("alvarás só rodam para São Paulo; esta rodada não inclui a cidade")
+        return
+    try:
+        from coletar.licenciamento import rodar_alvaras
+        rodar_alvaras(banco)
+    except Exception as e:  # noqa: BLE001
+        log.warning("AVISO: etapa dos alvarás falhou: %s: %s", type(e).__name__, e)
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="coletar", description="Coleta do monitor de mercado")
     p.add_argument(
@@ -251,6 +271,7 @@ def main(argv=None, *, fonte=None, banco=None, agora: datetime | None = None) ->
         if (fonte_propria and args.fonte == "orulo_login" and tipo == "completa_mensal" and not ids
                 and resultado.situacao != "falhou"):
             etapa_tabelas(banco, [m.nome for m in municipios])
+            etapa_alvaras(banco, [m.nome for m in municipios])
     except httpx.HTTPError as e:
         _marcar_erro_de_rede(banco, e)
         return 1
