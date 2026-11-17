@@ -1,6 +1,6 @@
 # Monitor de Mercado da BKM
 
-Coleta e armazenamento de empreendimentos residenciais em São Paulo e São José dos Campos. O dado é da BKM inteira: não há empresa, não há schema `app` e não há tabela do BKM Terrenos. O BKM Terrenos só lê estas tabelas depois.
+Coleta e armazenamento de empreendimentos residenciais. O banco reconhece São Paulo e São José dos Campos. O coletor também aceita 17 cidades vizinhas de São Paulo; a gravação delas depende da carga de `im_municipios` e `im_config` descrita em [docs/coletar.md](docs/coletar.md). O dado é da BKM inteira: não há empresa, não há schema `app` e não há tabela do BKM Terrenos. O BKM Terrenos só lê estas tabelas depois.
 
 Fase 1 grava unidade por unidade, com `preco_primeiro`, vigência de preço e situação, e a venda no fechamento da mensal completa. Não há vista nem função de velocidade, estoque ou lançamento sobre as unidades coletadas; o VSO histórico vem do relatório do Órulo (abaixo). A leitura é direta nas tabelas, pela API REST do Supabase.
 
@@ -74,9 +74,9 @@ Variáveis da rodada:
 | `ORULO_ATRASO_MIN`, `ORULO_ATRASO_MAX` | Opcionais. Padrão 2 e 3 segundos |
 | `COLETAR_TIPO` | `mensal` ou `lancamentos` quando o comando não traz `--tipo` |
 
-Não existe `EMPRESA_ID`. A semanal de lançamentos só varre a listagem e abre, um a um, o empreendimento que ainda não está no banco (detalhe e unidades). `--id` recolhe um ou mais empreendimentos sem essa varredura. O detalhe do comando, da planilha e dos dois jobs está em [docs/coletar.md](docs/coletar.md).
+Não existe `EMPRESA_ID`. A semanal de lançamentos só varre a listagem e abre, um a um, o empreendimento que ainda não está no banco (detalhe e unidades). `--id` recolhe um ou mais empreendimentos sem essa varredura. O coletor aceita, além de São Paulo e São José dos Campos, 17 cidades vizinhas na flag `--municipio` (a lista de 19 está em [docs/coletar.md](docs/coletar.md)). Sem a flag, a rodada continua as duas de sempre. O banco ainda só reconhece essas duas: as outras caem em `fora_do_filtro` até a carga de `im_municipios` e `im_config` descrita no mesmo doc. A tabela de preços continua só São Paulo.
 
-Vendas (`coleta-mensal`), dia 1 às 00:10 em São Paulo (`10 0 1 * *`), e lançamentos (`coleta-lancamentos`), segunda às 06:00 (`0 6 * * 1`), são jobs do Cloud Run no projeto `bkm-monitor`, região `southamerica-east1`, sem argumentos no container. O tipo vem de `COLETAR_TIPO` e a data é o dia da execução em `America/Sao_Paulo`. Montagem e o comando de teste em [docs/cloud-run.md](docs/cloud-run.md). Este repositório não faz o deploy.
+Vendas (`coleta-mensal`), dia 1 às 00:10 em São Paulo (`10 0 1 * *`), e lançamentos (`coleta-lancamentos`), segunda às 06:00 (`0 6 * * 1`), são jobs do Cloud Run no projeto `bkm-monitor`, região `southamerica-east1`, sem argumentos no container. O tipo vem de `COLETAR_TIPO` e a data é o dia da execução em `America/Sao_Paulo`. Para a agenda passar a cobrir as 19 cidades, os argumentos são os 19 `--municipio` em [docs/cloud-run.md](docs/cloud-run.md). Montagem e o comando de teste no mesmo doc. Este repositório não faz o deploy.
 
 ## Como o BKM Terrenos lê
 

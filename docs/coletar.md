@@ -17,13 +17,106 @@ COLETAR_TIPO=lancamentos coletar
 COLETAR_TIPO=mensal coletar --id 83029
 ```
 
+Para uma rodada com São Paulo, São José dos Campos e as 17 cidades vizinhas, a flag repete. Sem `--municipio`, a rodada continua só as duas de sempre. Este repositório não altera o job do Cloud Run; a lista é o argumento a configurar em `coleta-mensal` e `coleta-lancamentos` quando a coleta das 19 for ligada.
+
+```bash
+coletar --tipo mensal \
+  --municipio "São Paulo" \
+  --municipio "São José dos Campos" \
+  --municipio "Guarulhos" \
+  --municipio "Santo André" \
+  --municipio "Osasco" \
+  --municipio "São Caetano do Sul" \
+  --municipio "São Bernardo do Campo" \
+  --municipio "Taboão da Serra" \
+  --municipio "Diadema" \
+  --municipio "Barueri" \
+  --municipio "Poá" \
+  --municipio "Santana de Parnaíba" \
+  --municipio "Cotia" \
+  --municipio "Mauá" \
+  --municipio "Ferraz de Vasconcelos" \
+  --municipio "Itaquaquecetuba" \
+  --municipio "Itapecerica da Serra" \
+  --municipio "Cajamar" \
+  --municipio "Embu das Artes"
+```
+
 `--tipo` e `--data` podem faltar. Sem `--tipo`, vale `COLETAR_TIPO` (`mensal` ou `lancamentos`). Sem `--data`, a referência é o dia de hoje em `America/Sao_Paulo`, nos dois tipos. Flag na linha de comando ganha do ambiente e do relógio. A mensal não volta para o mês anterior nem é empurrada para o dia 1: a agenda já dispara no dia 1 às 00:10, então "hoje" já é o dia 1. `referencia` é a data da foto e faz parte da chave única `(fonte, tipo, referencia)`. `im_abrir_coleta` desfaz e reabre uma coleta que já exista nessa data; usar o mês anterior reabriria a mensal fechada.
 
 `--tipo mensal` grava a coleta `completa_mensal` e abre cada empreendimento da listagem: detalhe e unidades. `--tipo lancamentos` grava `lancamentos` e só varre a listagem, para achar o que ainda não está no banco. Cada empreendimento novo é aberto um a um, com `detalhe` e unidades (preço de lançamento, tipologias, total de unidades, estoque, datas). Quem já existe não é buscado de novo; a mensal cobre. A espera entre pedidos continua de 2 a 3 segundos.
 
 `--id` repete e pula a listagem. Serve para testar ou recolher um empreendimento, mesmo que ele já esteja no banco. Cada id passa pela rodada normal (`im_abrir_coleta`, importação, `im_fechar_coleta`). Não vale para `orulo_planilha`.
 
-Sem `--municipio`, entram São Paulo e São José dos Campos. `--fonte` padrão é `orulo_login`.
+Sem `--municipio`, entram São Paulo e São José dos Campos. `--fonte` padrão é `orulo_login`. A flag aceita também Guarulhos, Santo André, Osasco, São Caetano do Sul, São Bernardo do Campo, Taboão da Serra, Diadema, Barueri, Poá, Santana de Parnaíba, Cotia, Mauá, Ferraz de Vasconcelos, Itaquaquecetuba, Itapecerica da Serra, Cajamar e Embu das Artes. O nome é comparado sem acento e sem diferença de maiúscula. Cidade fora dessa lista sai com código 1 e a mensagem `município fora da lista monitorada`.
+
+Cada cidade vai para o `/api/elastic` com `state=SP`, `city` igual ao nome oficial (o mesmo de `address.city` no Órulo) e o retângulo que fatia o mapa. Não há id numérico de cidade. O código IBGE fica no catálogo (`coletar/municipios.py`) para o banco; o coletor não o envia. São Paulo (`3550308`) e São José dos Campos (`3549904`) seguem com os retângulos de sempre. O das 17 vizinhas é a extrema da malha municipal do IBGE (qualidade intermediária), arredondada para fora em duas casas.
+
+| Município | IBGE | Retângulo (sw_lat, sw_lng, ne_lat, ne_lng) |
+| --- | --- | --- |
+| São Paulo | 3550308 | -23,80, -46,83, -23,35, -46,36 (o de sempre; a malha do IBGE desce até cerca de -24,01) |
+| São José dos Campos | 3549904 | -23,30, -46,20, -22,85, -45,70 (o de sempre) |
+| Guarulhos | 3518800 | -23,51, -46,58, -23,27, -46,33 |
+| Santo André | 3547809 | -23,82, -46,57, -23,60, -46,27 |
+| Osasco | 3534401 | -23,61, -46,83, -23,46, -46,74 |
+| São Caetano do Sul | 3548807 | -23,66, -46,59, -23,60, -46,54 |
+| São Bernardo do Campo | 3548708 | -23,97, -46,66, -23,64, -46,41 |
+| Taboão da Serra | 3552809 | -23,65, -46,82, -23,59, -46,75 |
+| Diadema | 3513801 | -23,74, -46,66, -23,65, -46,57 |
+| Barueri | 3505708 | -23,56, -46,97, -23,47, -46,79 |
+| Poá | 3539806 | -23,58, -46,37, -23,50, -46,32 |
+| Santana de Parnaíba | 3547304 | -23,51, -47,04, -23,38, -46,80 |
+| Cotia | 3513009 | -23,81, -47,09, -23,56, -46,80 |
+| Mauá | 3529401 | -23,72, -46,50, -23,61, -46,38 |
+| Ferraz de Vasconcelos | 3515707 | -23,62, -46,40, -23,51, -46,35 |
+| Itaquaquecetuba | 3523107 | -23,52, -46,40, -23,42, -46,27 |
+| Itapecerica da Serra | 3522208 | -23,81, -46,94, -23,66, -46,76 |
+| Cajamar | 3509205 | -23,43, -46,95, -23,27, -46,81 |
+| Embu das Artes | 3515004 | -23,69, -46,92, -23,61, -46,79 |
+
+O banco ainda só reconhece São Paulo e São José dos Campos (`im_municipios` e `im_config.municipios`). `im_municipio_por_nome` devolve nulo para as outras, e `_im_passa_filtro` recusa município nulo ou fora de `im_config`. O empreendimento entra na descoberta e sai como `fora_do_filtro`, sem ser gravado. Esta pasta não traz migration. Para a importação passar a gravar, falta incluir as 17 linhas e somar os ids ao array de `im_config`, sem tirar os dois que já estão:
+
+```sql
+insert into public.im_municipios (codigo_ibge, nome, uf) values
+  ('3518800', 'Guarulhos', 'SP'),
+  ('3547809', 'Santo André', 'SP'),
+  ('3534401', 'Osasco', 'SP'),
+  ('3548807', 'São Caetano do Sul', 'SP'),
+  ('3548708', 'São Bernardo do Campo', 'SP'),
+  ('3552809', 'Taboão da Serra', 'SP'),
+  ('3513801', 'Diadema', 'SP'),
+  ('3505708', 'Barueri', 'SP'),
+  ('3539806', 'Poá', 'SP'),
+  ('3547304', 'Santana de Parnaíba', 'SP'),
+  ('3513009', 'Cotia', 'SP'),
+  ('3529401', 'Mauá', 'SP'),
+  ('3515707', 'Ferraz de Vasconcelos', 'SP'),
+  ('3523107', 'Itaquaquecetuba', 'SP'),
+  ('3522208', 'Itapecerica da Serra', 'SP'),
+  ('3509205', 'Cajamar', 'SP'),
+  ('3515004', 'Embu das Artes', 'SP')
+on conflict (codigo_ibge) do nothing;
+
+update public.im_config c
+   set municipios = (
+     select coalesce(array_agg(s.id order by s.codigo_ibge), '{}')
+       from (
+         select m.id, m.codigo_ibge
+           from public.im_municipios m
+          where m.id = any(c.municipios)
+         union
+         select m.id, m.codigo_ibge
+           from public.im_municipios m
+          where m.codigo_ibge in (
+            '3518800','3547809','3534401','3548807','3548708','3552809','3513801',
+            '3505708','3539806','3547304','3513009','3529401','3515707','3523107',
+            '3522208','3509205','3515004')
+       ) s
+   )
+ where c.unico;
+```
+
+A etapa de tabela de preços (categoria social) continua só para São Paulo, mesmo numa mensal com as 19 cidades. `python -m coletar.tabelas --municipio "São Paulo"` segue igual. Outra cidade nessa flag é ignorada; se nenhuma for São Paulo, o comando sai com 1.
 
 Saída 0 quando a coleta fecha completa, 2 quando fica incompleta, 3 quando falha (login), 1 em erro de uso, de configuração ou de rede. Sem `--tipo` e sem `COLETAR_TIPO` válido, ou com `--data` que não seja `AAAA-MM-DD`, sai 1 e não abre coleta: o Cloud Run marca a execução como falha. Flag desconhecida continua saindo 2, pelo argparse. `--help` sai 0 e não coleta; o job não deve receber `--help`, senão a execução fica verde sem ter coletado. Erro de rede (`httpx.HTTPError`, inclusive falha de conexão) marca a coleta aberta como `falhou` e sai com 1, sem traceback.
 

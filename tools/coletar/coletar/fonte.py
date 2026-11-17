@@ -11,6 +11,9 @@ class Municipio:
     uf: str
     # sw_lat, sw_lng, ne_lat, ne_lng. Retângulo usado para fatiar o mapa.
     bbox: tuple[float, float, float, float]
+    # Código IBGE de 7 dígitos. A descoberta não envia: o Órulo filtra pelo nome.
+    # Quem grava o código é im_municipios, no banco.
+    codigo_ibge: str | None = None
 
 
 @dataclass

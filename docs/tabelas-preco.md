@@ -32,6 +32,9 @@ Migration: `supabase/migrations/20261113010000_categoria_social.sql`.
 - Carga avulsa (feita na box em 12–13/nov/2026 para São Paulo):
   `python -m coletar.tabelas --municipio "São Paulo" --workers 3 --pasta pdfs`.
   Retomável: quem já tem linha em `im_tabelas_preco` é pulado.
+- Só São Paulo. A mensal, mesmo com outras cidades no `--municipio`, pede a
+  tabela só de São Paulo. Na carga avulsa, outra cidade é ignorada; se nenhuma
+  for São Paulo, o comando sai com 1. Sem `--municipio`, vale São Paulo.
 - Mesmo cuidado do coletor: um pedido por vez ao Órulo com espera
   `ORULO_ATRASO_MIN/MAX`; 403/429 ou login recusado param a etapa, sem tentar
   outro caminho.
