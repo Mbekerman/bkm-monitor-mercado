@@ -15,19 +15,17 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 
 from coletar.banco import BancoPostgres, BancoSupabase
-from coletar.descoberta import SJC_BBOX, SP_BBOX
 from coletar.erros import ColetaErro
 from coletar.fonte import ContextoColeta, Municipio
 from coletar.mapeamento import norm
+from coletar.municipios import MUNICIPIOS_MONITORADOS, MUNICIPIOS_PADRAO, municipios_para_tabelas
 from coletar.orulo_api import OruloApi
 from coletar.orulo_login import OruloLogin
 from coletar.orulo_planilha import OruloPlanilha, carregar_mapa
 from coletar.rodada import executar
 
-MUNICIPIOS = (
-    Municipio("São Paulo", "SP", SP_BBOX),
-    Municipio("São José dos Campos", "SP", SJC_BBOX),
-)
+# Sem --municipio a rodada continua estas duas. As outras 17 entram só na flag.
+MUNICIPIOS = MUNICIPIOS_PADRAO
 
 TIPOS = {"mensal": "completa_mensal", "lancamentos": "lancamentos", "completa_mensal": "completa_mensal"}
 TIPOS_CLI = ("mensal", "lancamentos")
@@ -86,7 +84,7 @@ def _atraso() -> tuple[float, float]:
 def municipios_pedidos(nomes: list[str] | None) -> list[Municipio]:
     if not nomes:
         return list(MUNICIPIOS)
-    por_nome = {norm(m.nome): m for m in MUNICIPIOS}
+    por_nome = {norm(m.nome): m for m in MUNICIPIOS_MONITORADOS}
     saida = []
     for nome in nomes:
         achado = por_nome.get(norm(nome))
@@ -166,15 +164,22 @@ def criar_banco():
 
 
 def etapa_tabelas(banco, municipios: list[str]) -> None:
-    """Depois da mensal: tabela de preços (categoria social) só dos empreendimentos novos.
+    """Depois da mensal: tabela de preços (categoria social) só dos empreendimentos novos de São Paulo.
 
-    COLETAR_TABELAS=0 desliga. Espera entre pedidos ao Órulo: TABELAS_ATRASO_MIN/MAX
-    (padrão 3 a 5 s). Falha aqui não muda o resultado da coleta.
+    Outra cidade da rodada não entra. COLETAR_TABELAS=0 desliga. Espera entre
+    pedidos ao Órulo: TABELAS_ATRASO_MIN/MAX (padrão 3 a 5 s). Falha aqui não
+    muda o resultado da coleta.
     """
     log = logging.getLogger("coletar")
     if os.environ.get("COLETAR_TABELAS", "1").strip() == "0":
         log.info("tabelas de preço desligadas (COLETAR_TABELAS=0)")
         return
+    pedidos = municipios_para_tabelas(municipios)
+    if not pedidos:
+        log.info("tabelas de preço só rodam para São Paulo; esta rodada não inclui a cidade")
+        return
+    if any(norm(nome) != norm(pedidos[0]) for nome in municipios):
+        log.info("tabelas de preço limitadas a São Paulo")
     try:
         from coletar.tabelas import rodar_tabelas
         try:
@@ -184,7 +189,7 @@ def etapa_tabelas(banco, municipios: list[str]) -> None:
         orulo = OruloLogin(
             email=os.environ.get("ORULO_EMAIL", ""), senha=os.environ.get("ORULO_PASSWORD", ""), atraso=atraso,
         )
-        rodar_tabelas(banco, orulo, municipios)
+        rodar_tabelas(banco, orulo, pedidos)
     except Exception as e:  # noqa: BLE001
         log.warning("AVISO: etapa das tabelas de preço falhou: %s: %s", type(e).__name__, e)
 
@@ -200,7 +205,11 @@ def parser() -> argparse.ArgumentParser:
         help="data de referência AAAA-MM-DD. Sem a flag, o dia de hoje em America/Sao_Paulo",
     )
     p.add_argument("--fonte", default="orulo_login", choices=["orulo_login", "orulo_planilha", "orulo_api"])
-    p.add_argument("--municipio", action="append", default=None, help="repete para cada cidade; padrão São Paulo e São José dos Campos")
+    p.add_argument(
+        "--municipio", action="append", default=None,
+        help="repete para cada cidade. Sem a flag: São Paulo e São José dos Campos. "
+             "Também aceita as 17 cidades vizinhas de São Paulo",
+    )
     p.add_argument("--arquivo", default=None, help="planilha .csv ou .xlsx, obrigatório em orulo_planilha")
     p.add_argument("--mapa", default=None, help="JSON de campo para nome de coluna, quando a planilha não usa o cabeçalho padrão")
     p.add_argument(

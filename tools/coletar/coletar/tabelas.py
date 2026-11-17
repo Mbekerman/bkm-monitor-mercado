@@ -7,6 +7,9 @@ tudo, sem tentar outro caminho; a próxima rodada retoma de onde parou.
 
 Uso avulso (carga inicial):
   python -m coletar.tabelas --municipio "São Paulo" [--workers 3] [--pasta DIR] [--limite N]
+
+Só São Paulo. Sem --municipio, vale São Paulo. Outra cidade na flag é ignorada;
+se nenhuma for São Paulo, o comando sai com 1 e não consulta o banco.
 """
 from __future__ import annotations
 
@@ -249,20 +252,28 @@ def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     p = argparse.ArgumentParser(prog="coletar.tabelas", description="Tabelas de preço do Órulo -> categoria social")
-    p.add_argument("--municipio", action="append", default=None)
+    p.add_argument("--municipio", action="append", default=None, help="só São Paulo; sem a flag, vale São Paulo")
     p.add_argument("--limite", type=int, default=None)
     p.add_argument("--pasta", default=None, help="guarda os PDFs baixados aqui")
     p.add_argument("--workers", type=int, default=0, help="processos de leitura/OCR (0 = no mesmo processo)")
     p.add_argument("--parar-se-existir", default=None, help="arquivo que, se criado, para a carga com calma")
     args = p.parse_args(argv)
     from coletar.cli import _atraso, criar_banco
+    from coletar.mapeamento import norm
+    from coletar.municipios import MUNICIPIO_TABELAS, municipios_para_tabelas
     from coletar.orulo_login import OruloLogin
+    pedidos = municipios_para_tabelas(args.municipio)
+    if args.municipio is not None and not pedidos:
+        print("tabelas de preço só rodam para São Paulo", file=sys.stderr)
+        return 1
+    if args.municipio and any(norm(nome) != norm(MUNICIPIO_TABELAS) for nome in args.municipio):
+        log.info("tabelas de preço limitadas a São Paulo")
     banco = criar_banco()
     orulo = OruloLogin(email=os.environ.get("ORULO_EMAIL", ""), senha=os.environ.get("ORULO_PASSWORD", ""),
                        atraso=_atraso())
     parar = (lambda: os.path.exists(args.parar_se_existir)) if args.parar_se_existir else None
     try:
-        r = rodar_tabelas(banco, orulo, args.municipio, limite=args.limite, pasta=args.pasta,
+        r = rodar_tabelas(banco, orulo, pedidos, limite=args.limite, pasta=args.pasta,
                           workers=args.workers, parar=parar)
     finally:
         banco.fechar()

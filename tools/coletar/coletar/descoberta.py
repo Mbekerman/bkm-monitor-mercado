@@ -14,9 +14,11 @@ MAX_POR_CHAMADA = 500
 PROFUNDIDADE_MAX = 9
 
 # Os mesmos limites aproximados do município que o código de referência usou.
+# Não trocar pelo retângulo da malha do IBGE: o sul do município passa de -23,80.
 SP_BBOX = (-23.80, -46.83, -23.35, -46.36)
 # Retângulo aproximado de São José dos Campos, no mesmo papel do de São Paulo.
 SJC_BBOX = (-23.30, -46.20, -22.85, -45.70)
+# As outras cidades monitoradas estão em municipios.py.
 
 
 def params_cidade(uf: str, cidade: str) -> list[tuple[str, str]]:

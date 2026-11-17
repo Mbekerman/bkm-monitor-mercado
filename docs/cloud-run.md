@@ -27,6 +27,20 @@ O entrypoint antigo gravava a data UTC. Nestes dois horários (00:10 e 06:00 em 
 
 Tipo ausente ou fora de `mensal`/`lancamentos`, ou data que não seja `AAAA-MM-DD`, imprime o motivo em stderr e sai com código 1. O Cloud Run marca a execução como falha. Flag desconhecida sai com código 2. `--help` sai com código 0 e não coleta: um argumento `--help` deixa a execução verde à toa.
 
+## Argumentos para as 19 cidades
+
+O job, como está, não recebe argumento: sem `--municipio` a rodada continua São Paulo e São José dos Campos. Este repositório não altera o job. Para uma execução (ou para a definição do job, quando alguém for mudá-la) cobrir também as 17 vizinhas, os argumentos são estes. A vírgula separa os argumentos do `gcloud`; o espaço faz parte do nome.
+
+```bash
+gcloud run jobs execute coleta-mensal \
+  --project=bkm-monitor \
+  --region=southamerica-east1 \
+  --wait \
+  --args="--municipio,São Paulo,--municipio,São José dos Campos,--municipio,Guarulhos,--municipio,Santo André,--municipio,Osasco,--municipio,São Caetano do Sul,--municipio,São Bernardo do Campo,--municipio,Taboão da Serra,--municipio,Diadema,--municipio,Barueri,--municipio,Poá,--municipio,Santana de Parnaíba,--municipio,Cotia,--municipio,Mauá,--municipio,Ferraz de Vasconcelos,--municipio,Itaquaquecetuba,--municipio,Itapecerica da Serra,--municipio,Cajamar,--municipio,Embu das Artes"
+```
+
+O mesmo bloco vale para `coleta-lancamentos`. `--args` nessa execução substitui os argumentos do job, como no exemplo do `--id` abaixo. A tabela de preços da mensal continua só São Paulo. O banco ainda só grava São Paulo e São José dos Campos até a carga de `im_municipios` e `im_config` descrita em [coletar.md](coletar.md).
+
 ## Por que a execução de 2026-11-03 não coletou
 
 O CLI exigia `--tipo` e `--data` e não lia `COLETAR_TIPO`. Sem os dois, o argparse imprime `usage: coletar [-h] --tipo {mensal,lancamentos} --data DATA` e sai com código 2. A única saída 0 que imprime esse usage é `--help` / `-h`: o argparse trata a ajuda como sucesso, e o Cloud Run grava `Container called exit(0)`.

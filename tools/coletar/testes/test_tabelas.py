@@ -134,3 +134,35 @@ def test_etapa_tabelas_desligada(monkeypatch):
     monkeypatch.setenv("COLETAR_TABELAS", "0")
     monkeypatch.setattr(t, "rodar_tabelas", lambda *a, **k: (_ for _ in ()).throw(AssertionError("não devia rodar")))
     cli.etapa_tabelas(object(), ["São Paulo"])
+
+
+def test_etapa_tabelas_limita_a_sao_paulo(monkeypatch):
+    import coletar.cli as cli
+    import coletar.tabelas as t
+    vistos = []
+    monkeypatch.setenv("COLETAR_TABELAS", "1")
+    monkeypatch.setattr(cli, "OruloLogin", lambda **k: object())
+    monkeypatch.setattr(t, "rodar_tabelas", lambda banco, orulo, municipios, **k: vistos.append(municipios))
+    cli.etapa_tabelas(object(), ["Guarulhos", "São Paulo", "São José dos Campos"])
+    assert vistos == [["São Paulo"]]
+    cli.etapa_tabelas(object(), ["Poá", "Cotia"])
+    assert vistos == [["São Paulo"]]
+
+
+def test_cli_tabelas_so_sao_paulo(monkeypatch, capsys):
+    import coletar.tabelas as t
+    vistos = []
+
+    class Banco:
+        def fechar(self):
+            pass
+
+    monkeypatch.setattr("coletar.cli.criar_banco", lambda: Banco())
+    monkeypatch.setattr("coletar.orulo_login.OruloLogin", lambda **k: object())
+    monkeypatch.setattr(t, "rodar_tabelas", lambda banco, orulo, municipios, **k: vistos.append(municipios) or t.ResumoTabelas())
+    assert t.main(["--municipio", "São Paulo"]) == 0
+    assert t.main([]) == 0
+    assert t.main(["--municipio", "Guarulhos", "--municipio", "São Paulo"]) == 0
+    assert vistos == [["São Paulo"], ["São Paulo"], ["São Paulo"]]
+    assert t.main(["--municipio", "Guarulhos"]) == 1
+    assert "só rodam para São Paulo" in capsys.readouterr().err
