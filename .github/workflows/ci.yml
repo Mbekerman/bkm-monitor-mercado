@@ -10,7 +10,13 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-16
+      # A imagem já traz o Postgres 16; só instala se faltar. O repositório apt da
+      # Microsoft da imagem passou a responder 403 e derrubava o apt-get update.
+      - run: |
+          dpkg -s postgresql-16 >/dev/null 2>&1 || {
+            sudo rm -f /etc/apt/sources.list.d/microsoft*
+            sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-16
+          }
       - run: bash supabase/tests/run.sh
 
   coletor:
@@ -20,7 +26,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-16
+      # A imagem já traz o Postgres 16; só instala se faltar. O repositório apt da
+      # Microsoft da imagem passou a responder 403 e derrubava o apt-get update.
+      - run: |
+          dpkg -s postgresql-16 >/dev/null 2>&1 || {
+            sudo rm -f /etc/apt/sources.list.d/microsoft*
+            sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-16
+          }
       - run: pip install -e "./tools/coletar[teste]"
       - run: python -m pytest -q
         working-directory: tools/coletar

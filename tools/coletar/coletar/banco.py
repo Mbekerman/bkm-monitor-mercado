@@ -16,6 +16,7 @@ from pathlib import Path
 
 import httpx
 
+from coletar.fonte import fonte_ids
 from coletar.erros import ColetaErro
 
 try:
@@ -228,7 +229,7 @@ class BancoSupabase:
     def conhecidos(self, fonte: str) -> dict[str, str]:
         ids = self._get("im_ids_externos", {
             "select": "id_externo,entidade_id",
-            "fonte": f"eq.{fonte}",
+            "fonte": f"eq.{fonte_ids(fonte)}",
             "entidade": "eq.empreendimento",
         })
         if not ids:
@@ -370,7 +371,7 @@ class BancoPostgres:
                 on s.empreendimento_id = i.entidade_id and s.ate_coleta_id is null
              where i.fonte = %s and i.entidade = 'empreendimento'
             """,
-            (fonte,),
+            (fonte_ids(fonte),),
         ).fetchall()
         return {r[0]: r[1] for r in rows}
 

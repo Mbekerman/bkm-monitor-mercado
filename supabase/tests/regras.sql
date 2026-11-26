@@ -463,6 +463,36 @@ select pg_temp.ok((select 'statement_timeout=10min' = any(proconfig) from pg_pro
   'fechamento tem statement_timeout próprio de 10 min (a API corta em 8 s)');
 
 -- ---------------------------------------------------------------------
+\echo '# troca de fonte: orulo_login -> orulo_api'
+select public.im_salvar_config('{"cobertura_minima_pct": 1}');
+select public.im_abrir_coleta('orulo_login', 'completa_mensal', '2028-01-01') as c_tl \gset
+select pg_temp.ok((public.im_importar(:'c_tl', jsonb_build_array(pg_temp.ej('troca-1', 'Troca Fonte',
+  (select jsonb_agg(pg_temp.uj(i::text, 50, 500000, 'disponivel', 2, 1, 1, 'apartamento', 'T', 't' || i)) from generate_series(1, 6) i),
+  'vertical', 'residencial', 'em_obras', '2026-06-01')))->>'erros')::int = 0, 'login importa o empreendimento');
+select pg_temp.ok((public.im_fechar_coleta(:'c_tl')->>'situacao') = 'completa', 'mensal do login fecha');
+select count(*) as n_emp_antes from public.im_empreendimentos \gset
+select count(*) as n_uni_antes from public.im_unidades \gset
+select public.im_abrir_coleta('orulo_api', 'completa_mensal', '2028-02-01') as c_ta \gset
+select pg_temp.ok((public.im_importar(:'c_ta', jsonb_build_array(
+  pg_temp.ej('troca-1', 'Troca Fonte',
+    (select jsonb_agg(pg_temp.uj(i::text, 50, 500000, case when i = 1 then 'vendida' else 'disponivel' end, 2, 1, 1, 'apartamento', 'T', 't' || i)) from generate_series(1, 6) i),
+    'vertical', 'residencial', 'em_obras', '2026-06-01'),
+  pg_temp.ej('troca-novo', 'Novo Pela API',
+    (select jsonb_agg(pg_temp.uj(i::text, 40, 400000, 'disponivel', 1, 1, 1, 'apartamento', 'N', 'n' || i)) from generate_series(1, 3) i),
+    'vertical', 'residencial', 'lancamento', '2027-01-20')))->>'erros')::int = 0, 'api importa o mesmo e um novo');
+select pg_temp.ok((select count(*) from public.im_empreendimentos) = :n_emp_antes + 1, 'api não recria o empreendimento do login, só cria o novo');
+select pg_temp.ok((select count(*) from public.im_unidades) = :n_uni_antes + 3, 'api não recria as unidades do login');
+select pg_temp.ok((select count(*) = 2 and bool_and(fonte = 'orulo_login') from public.im_ids_externos
+                    where entidade = 'empreendimento' and id_externo in ('troca-1', 'troca-novo')), 'ids seguem no espaço orulo_login, sem cópia');
+select pg_temp.ok((public.im_fechar_coleta(:'c_ta')->>'vendas')::int = 1, 'primeira mensal da api acha a mensal anterior do login e grava a venda');
+select pg_temp.ok((select vendida_de = '2028-01-01' and not antes_do_monitor from public.im_vendas v
+                    join public.im_unidades u on u.id = v.unidade_id
+                    join public.im_ids_externos x on x.entidade = 'empreendimento' and x.entidade_id = u.empreendimento_id and x.id_externo = 'troca-1'),
+                  'venda pela api vem da mensal do login');
+select pg_temp.falha($$select public.im_abrir_coleta('orulo_login', 'completa_mensal', '2028-01-01')$$, 'não reabre mensal do login com mensal da api depois');
+select public.im_salvar_config('{"cobertura_minima_pct": 90}');
+
+-- ---------------------------------------------------------------------
 \echo '# resumo do empreendimento: grupos (regra do Moisés, 4/nov/2026)'
 create function pg_temp.emp(p_ext text) returns uuid language sql stable as $$
   select entidade_id from public.im_ids_externos where entidade = 'empreendimento' and id_externo = p_ext $$;
@@ -606,25 +636,25 @@ select pg_temp.falha($$insert into public.im_historico_orulo (orulo_id, mes, uni
 set role postgres;
 
 \echo '# categoria social (tabela de preços)'
-insert into public.im_ids_externos (entidade, entidade_id, fonte, id_externo)
-  values ('empreendimento', pg_temp.emp('g-area'), 'orulo_login', '88001');
+-- A coleta de teste grava o id em orulo_login (espaço de ids do Órulo): troca para um número.
+update public.im_ids_externos set id_externo = '88001' where entidade = 'empreendimento' and entidade_id = :'e_hist' and fonte = 'orulo_login';
 select pg_temp.ok((
   select bool_or(x->>'id_externo' = '88001')
   from jsonb_array_elements(public.im_tabelas_pendentes(array['São Paulo'])) x
 ), 'empreendimento sem tabela entra nos pendentes');
 select id as u_cat from public.im_unidades
- where empreendimento_id = pg_temp.emp('g-area') and numero = '1' \gset
+ where empreendimento_id = :'e_hist'::uuid and numero = '1' \gset
 select id as u_man from public.im_unidades
- where empreendimento_id = pg_temp.emp('g-area') and numero = '2' \gset
+ where empreendimento_id = :'e_hist'::uuid and numero = '2' \gset
 update public.im_unidades
    set categoria_social = 'hmp', categoria_social_fonte = 'manual', categoria_social_em = now()
  where id = :'u_man';
 select pg_temp.ok((
   select bool_or(x->>'numero' = '1' and x->>'categoria_social_fonte' is null)
-  from jsonb_array_elements(public.im_unidades_para_tabela(pg_temp.emp('g-area'))) x
+  from jsonb_array_elements(public.im_unidades_para_tabela(:'e_hist'::uuid)) x
 ), 'unidades para a tabela trazem o número e a fonte ainda vazia');
 select public.im_registrar_tabela_preco(jsonb_build_object(
-  'empreendimento_id', pg_temp.emp('g-area'), 'id_externo', '88001',
+  'empreendimento_id', :'e_hist'::uuid, 'id_externo', '88001',
   'arquivo_id', '42', 'arquivo_nome', 'tabela_area_novembro_2026.pdf',
   'referencia', '2026-11-01', 'status', 'ok', 'metodo_texto', 'pdftotext', 'paginas', 2,
   'resto_fonte', 'fora_da_tabela',
@@ -636,26 +666,26 @@ select pg_temp.ok((select categoria_social = 'his2' and categoria_social_fonte =
 select pg_temp.ok((select categoria_social = 'hmp' and categoria_social_fonte = 'manual'
   from public.im_unidades where id = :'u_man'), 'fonte manual não é sobrescrita');
 select pg_temp.ok((select count(*) = 7 from public.im_unidades
-  where empreendimento_id = pg_temp.emp('g-area')
+  where empreendimento_id = :'e_hist'::uuid
     and categoria_social = 'nao_informado' and categoria_social_fonte = 'fora_da_tabela'),
   'unidade fora da tabela fica nao_informado');
 select public.im_registrar_tabela_preco(jsonb_build_object(
-  'empreendimento_id', pg_temp.emp('g-area'), 'id_externo', '88001', 'arquivo_id', '42',
+  'empreendimento_id', :'e_hist'::uuid, 'id_externo', '88001', 'arquivo_id', '42',
   'arquivo_nome', 'tabela_area_novembro_2026.pdf', 'status', 'ok', 'resto_fonte', 'fora_da_tabela',
   'unidades', jsonb_build_array(jsonb_build_object(
     'id', :'u_cat', 'categoria', 'his1', 'fonte', 'tabela_unidade'))));
 select pg_temp.ok((select count(*) = 1 from public.im_tabelas_preco
-  where empreendimento_id = pg_temp.emp('g-area') and arquivo_id = '42'),
+  where empreendimento_id = :'e_hist'::uuid and arquivo_id = '42'),
   'a mesma tabela atualiza a linha, sem duplicar');
 select pg_temp.ok((select categoria_social = 'his1' from public.im_unidades where id = :'u_cat'),
   'reprocessar a tabela atualiza a categoria');
 select public.im_registrar_tabela_preco(jsonb_build_object(
-  'empreendimento_id', pg_temp.emp('g-area'), 'id_externo', '88001', 'arquivo_id', '99',
+  'empreendimento_id', :'e_hist'::uuid, 'id_externo', '88001', 'arquivo_id', '99',
   'status', 'erro', 'resto_fonte', 'fora_da_tabela', 'detalhe', 'falha de leitura'));
 select pg_temp.ok((select categoria_social = 'his1' and categoria_social_fonte = 'tabela_unidade'
     from public.im_unidades where id = :'u_cat')
   and (select status = 'erro' from public.im_tabelas_preco
-       where empreendimento_id = pg_temp.emp('g-area') and arquivo_id = '99'),
+       where empreendimento_id = :'e_hist'::uuid and arquivo_id = '99'),
   'status erro só registra a linha');
 select pg_temp.ok(not coalesce((select bool_or(x->>'id_externo' = '88001')
   from jsonb_array_elements(public.im_tabelas_pendentes(array['São Paulo'])) x), false),
