@@ -1,8 +1,23 @@
-"""Esqueleto da API oficial v2 (OAuth2 client credentials).
+"""Adaptador orulo_api: API oficial v2 do Órulo (OAuth2 client credentials).
 
-Pronto para receber ORULO_CLIENT_ID e ORULO_CLIENT_SECRET. Sem as duas
-variáveis, não chama a rede. O contrato é o da API oficial v2:
-token em POST /oauth/token e os recursos em /api/v2/buildings.
+Credenciais só em ORULO_CLIENT_ID e ORULO_CLIENT_SECRET (Secret Manager); sem
+as duas, não chama a rede. Contrato: OpenAPI v2.0.92 de documento.orulo.com.br,
+conferido com a integração de homologação da BKM em 26/nov/2026.
+
+- Token: POST /oauth/token (client_credentials), validade de cerca de 1 ano.
+- Listagem: GET /api/v2/buildings por UF e cidade, com os mesmos filtros da
+  descoberta do orulo_login (obra e pronto novo, residencial). A API devolve no
+  máximo 50 por página, mesmo pedindo mais, e no máximo 10 mil por filtro
+  (`results_limit_exceeded`). Paginamos por `total_pages`.
+- Detalhe: GET /api/v2/buildings/{id}?include[]=not_available.
+- Unidades: GET /api/v2/buildings/{id}/units com include[]=not_available e os
+  mesmos status do orulo_login, num pedido só (a rota ignora `page`). O formato da unidade é o mesmo do portal (mapeamento.py não muda).
+- Tabela de preços (arquivos) não existe aqui: a API só entrega arquivo com
+  login de corretor (oruloEndUserAuth) e proíbe gravar. A etapa das tabelas
+  continua só no orulo_login.
+
+O id do empreendimento é o mesmo do portal; o banco casa as duas fontes pelo
+mesmo espaço de ids (migration fonte_orulo_api).
 """
 from __future__ import annotations
 
@@ -25,6 +40,11 @@ PARAMS_UNIDADES = [
 ]
 
 
+USER_AGENT_API = "bkm-monitor-mercado/1.0 (+integracao Orulo IM)"
+POR_PAGINA = 50
+MAX_PAGINAS = 400
+
+
 class OruloApi:
     nome = "orulo_api"
 
@@ -38,6 +58,9 @@ class OruloApi:
         self.http = ClienteHttp(**kw)
         self.http.cabecalhos_auth = self._bearer
         self.http.renovar = self._obter_token
+        self.http.http.headers["User-Agent"] = USER_AGENT_API
+        self.disclaimer: str | None = None
+        self.limite_excedido: list[str] = []
 
     def fechar(self) -> None:
         self.http.fechar()
@@ -79,9 +102,11 @@ class OruloApi:
         return r.json()
 
     def listar(self, uf: str, cidade: str) -> list[dict]:
-        saida = []
+        saida: list[dict] = []
+        vistos: set[str] = set()
         pagina = 1
-        while pagina <= 100:
+        total = 1
+        while pagina <= min(total, MAX_PAGINAS):
             data = self._json(
                 "GET", f"{BASE}/api/v2/buildings",
                 params=[
@@ -91,23 +116,35 @@ class OruloApi:
                     ("status[]", "under_construction"),
                     ("finality[]", "residential"),
                     ("page", str(pagina)),
-                    ("results_per_page", "500"),
+                    ("results_per_page", str(POR_PAGINA)),
                 ],
             )
             if not isinstance(data, dict):
                 break
+            if data.get("disclaimer") and not self.disclaimer:
+                self.disclaimer = str(data.get("disclaimer"))
+            if data.get("results_limit_exceeded") and cidade not in self.limite_excedido:
+                self.limite_excedido.append(cidade)
             lote = data.get("buildings") or []
-            saida.extend(b for b in lote if isinstance(b, dict) and b.get("id") is not None)
+            for b in lote:
+                if isinstance(b, dict) and b.get("id") is not None and str(b["id"]) not in vistos:
+                    vistos.add(str(b["id"]))
+                    saida.append(b)
             total = int(data.get("total_pages") or 1)
-            if pagina >= total or not lote:
+            if not lote:
                 break
             pagina += 1
         return saida
 
     def detalhe(self, building_id):
-        return self._json("GET", f"{BASE}/api/v2/buildings/{building_id}")
+        return self._json(
+            "GET", f"{BASE}/api/v2/buildings/{building_id}",
+            params=[("include[]", "not_available")],
+        )
 
     def unidades(self, building_id) -> list | None:
+        # A rota devolve todas as unidades de uma vez e ignora `page` (conferido em
+        # 26/nov/2026: page=1, 2 e 3 trazem as mesmas 346 unidades). Um pedido só.
         data = self._json(
             "GET", f"{BASE}/api/v2/buildings/{building_id}/units",
             params=PARAMS_UNIDADES,
@@ -182,6 +219,12 @@ class OruloApi:
                         falhas.append({"id_externo": "", "motivo": "descoberta", "detalhe": f"{mun.nome}: {e}"[:500]})
                         forcar = True
                         continue
+                    if mun.nome in self.limite_excedido:
+                        forcar = True
+                        falhas.append({
+                            "id_externo": "", "motivo": "descoberta",
+                            "detalhe": f"{mun.nome}: listagem passou de 10 mil (results_limit_exceeded)",
+                        })
                     for bruto in lista:
                         visitar(bruto.get("id"), bruto)
                         if forcar or falhou:
@@ -190,13 +233,14 @@ class OruloApi:
             self.fechar()
         return ResultadoFonte(
             empreendimentos=emps,
-            bruto={"fonte": self.nome, "tipo": ctx.tipo, "referencia": ctx.referencia.isoformat(), "itens": itens},
+            bruto={"fonte": self.nome, "tipo": ctx.tipo, "referencia": ctx.referencia.isoformat(),
+                   "disclaimer": self.disclaimer, "itens": itens},
             esperados=esperados,
             falhas=falhas,
             forcar_incompleta=forcar,
             falhou=falhou,
             motivo_falha=motivo,
-            avisos=["A API oficial ainda não foi exercitada com credenciais reais; o cliente segue o OpenAPI v2."],
+            avisos=([f"Órulo: {self.disclaimer}"] if self.disclaimer else []),
         )
 
     def _um(self, ctx, bid, lista):

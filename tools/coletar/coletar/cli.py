@@ -115,6 +115,16 @@ def criar_fonte(nome: str, *, arquivo: str | None, mapa: str | None, transporte=
     raise ColetaErro(f"fonte desconhecida: {nome}")
 
 
+FONTES = ("orulo_login", "orulo_planilha", "orulo_api")
+
+
+def resolver_fonte(valor: str | None) -> str:
+    nome = (valor or os.environ.get("COLETAR_FONTE") or "orulo_login").strip()
+    if nome not in FONTES:
+        raise ColetaErro(f"COLETAR_FONTE inválida: {nome!r} (use orulo_login ou orulo_api)")
+    return nome
+
+
 def ids_pedidos(valores: list[str] | None) -> tuple[str, ...]:
     if not valores:
         return ()
@@ -224,7 +234,10 @@ def parser() -> argparse.ArgumentParser:
         "--data", default=None,
         help="data de referência AAAA-MM-DD. Sem a flag, o dia de hoje em America/Sao_Paulo",
     )
-    p.add_argument("--fonte", default="orulo_login", choices=["orulo_login", "orulo_planilha", "orulo_api"])
+    p.add_argument(
+        "--fonte", default=None, choices=list(FONTES),
+        help="orulo_login, orulo_api ou orulo_planilha. Sem a flag, usa COLETAR_FONTE (padrão orulo_login)",
+    )
     p.add_argument(
         "--municipio", action="append", default=None,
         help="repete para cada cidade. Sem a flag: São Paulo e São José dos Campos. "
@@ -245,6 +258,7 @@ def main(argv=None, *, fonte=None, banco=None, agora: datetime | None = None) ->
     try:
         tipo_nome = resolver_tipo(args.tipo)
         referencia = resolver_data(args.data, agora)
+        args.fonte = resolver_fonte(args.fonte)
     except ColetaErro as e:
         print(str(e), file=sys.stderr)
         return 1

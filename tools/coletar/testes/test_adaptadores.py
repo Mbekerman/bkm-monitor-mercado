@@ -445,7 +445,7 @@ class TestApi:
         with pytest.raises(OruloAuthError):
             api.coletar(_ctx())
 
-    def test_esqueleto_com_token_mapeia_um_empreendimento(self):
+    def test_com_token_mapeia_um_empreendimento(self):
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/oauth/token":
                 corpo = request.content.decode()
@@ -454,18 +454,25 @@ class TestApi:
                 assert "client_secret=segredo" in corpo
                 return httpx.Response(200, json={"access_token": "api-tok"})
             assert request.headers["authorization"] == "Bearer api-tok"
+            assert "Mozilla" not in request.headers["user-agent"]
             if request.url.path == "/api/v2/buildings":
                 assert request.url.params.get_list("finality[]") == ["residential"]
+                assert request.url.params["city"] == "São Paulo"
                 return httpx.Response(200, json={
                     "buildings": [_predio(7, "Lançamento", "Em construção")],
-                    "page": 1, "total_pages": 1,
+                    "page": 1, "total_pages": 1, "disclaimer": "Dados da Órulo",
                 })
             if request.url.path == "/api/v2/buildings/7":
+                assert request.url.params.get_list("include[]") == ["not_available"]
                 return httpx.Response(200, json=_predio(7, "Lançamento", "Em construção"))
             if request.url.path == "/api/v2/buildings/7/units":
                 assert "not_available" in request.url.params.get_list("include[]")
+                assert "page" not in request.url.params
                 return httpx.Response(200, json={"units": [{
-                    "reference": "1", "section": "A", "status": "available", "type": "Apartamento",
+                    "reference": "1", "section": "A", "status": "Disponível", "type": "Apartamento",
+                    "price": 10, "private_area": 40,
+                }, {
+                    "reference": "2", "section": "A", "status": "Vendida", "type": "Apartamento",
                     "price": 10, "private_area": 40,
                 }]})
             return httpx.Response(404)
@@ -474,5 +481,65 @@ class TestApi:
                        transporte=httpx.MockTransport(handler))
         resultado = api.coletar(_ctx())
         assert resultado.empreendimentos[0]["id_externo"] == "7"
-        assert resultado.empreendimentos[0]["unidades"][0]["situacao"] == "disponivel"
-        assert any("OpenAPI" in a for a in resultado.avisos)
+        assert [u["situacao"] for u in resultado.empreendimentos[0]["unidades"]] == ["disponivel", "vendida"]
+        assert resultado.bruto["disclaimer"] == "Dados da Órulo"
+        assert not resultado.forcar_incompleta
+
+    def test_listagem_pagina_ate_total_pages(self):
+        paginas = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/oauth/token":
+                return httpx.Response(200, json={"access_token": "t"})
+            if request.url.path == "/api/v2/buildings":
+                p = int(request.url.params["page"])
+                paginas.append(p)
+                assert request.url.params["results_per_page"] == "50"
+                return httpx.Response(200, json={
+                    "buildings": [_predio(p * 10 + i, "Pronto novo", "Pronto novo") for i in range(2)],
+                    "page": p, "total_pages": 3,
+                })
+            return httpx.Response(404)
+
+        api = OruloApi(client_id="c", client_secret="s", atraso=ATRASO, sleep=_noop,
+                       transporte=httpx.MockTransport(handler))
+        lista = api.listar("SP", "São Paulo")
+        assert paginas == [1, 2, 3]
+        assert len(lista) == 6
+        api.fechar()
+
+    def test_limite_de_10_mil_deixa_incompleta(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/oauth/token":
+                return httpx.Response(200, json={"access_token": "t"})
+            if request.url.path == "/api/v2/buildings":
+                return httpx.Response(200, json={"buildings": [], "page": 1, "total_pages": 1,
+                                                  "results_limit_exceeded": True})
+            return httpx.Response(404)
+
+        api = OruloApi(client_id="c", client_secret="s", atraso=ATRASO, sleep=_noop,
+                       transporte=httpx.MockTransport(handler))
+        resultado = api.coletar(_ctx())
+        assert resultado.forcar_incompleta
+        assert any("10 mil" in f["detalhe"] for f in resultado.falhas)
+
+    def test_detalhe_404_vira_falha_e_segue(self):
+        # Na homologação a listagem traz prédios cujo detalhe responde 404.
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/oauth/token":
+                return httpx.Response(200, json={"access_token": "t"})
+            if request.url.path == "/api/v2/buildings":
+                return httpx.Response(200, json={
+                    "buildings": [_predio(1, "Pronto novo", "Pronto novo"), _predio(2, "Pronto novo", "Pronto novo")],
+                    "page": 1, "total_pages": 1})
+            if request.url.path == "/api/v2/buildings/2":
+                return httpx.Response(200, json=_predio(2, "Pronto novo", "Pronto novo"))
+            if request.url.path == "/api/v2/buildings/2/units":
+                return httpx.Response(200, json={"units": []})
+            return httpx.Response(404, json={"error_message": "id não corresponde a nenhum empreendimento"})
+
+        api = OruloApi(client_id="c", client_secret="s", atraso=ATRASO, sleep=_noop,
+                       transporte=httpx.MockTransport(handler))
+        resultado = api.coletar(_ctx())
+        assert [e["id_externo"] for e in resultado.empreendimentos] == ["2"]
+        assert resultado.falhas == [{"id_externo": "1", "motivo": "nao_encontrado", "detalhe": "detalhe 404"}]

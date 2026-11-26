@@ -1,6 +1,6 @@
 # Coletor do monitor de mercado
 
-O coletor fica em `tools/coletar` (Python 3.11+, pacote `coletar`). A regra continua no banco: o comando só busca a fonte, grava o bruto e chama `im_abrir_coleta`, `im_importar` (lotes de até 50 empreendimentos e 400 unidades; empreendimento maior vai em partes, ver abaixo), `im_anotar_falha`, `im_falhar_coleta` e `im_fechar_coleta`. A interface é `FonteMercado`. Os adaptadores são `orulo_login` (completo), `orulo_planilha` (leitor à espera de amostra real) e `orulo_api` (esqueleto OAuth2 da API v2). As tabelas que ele lê são `im_ids_externos` e `im_empreendimento_estados`. O prefixo `im_` é minúsculo e sem aspas. Não há `empresa_id`.
+O coletor fica em `tools/coletar` (Python 3.11+, pacote `coletar`). A regra continua no banco: o comando só busca a fonte, grava o bruto e chama `im_abrir_coleta`, `im_importar` (lotes de até 50 empreendimentos e 400 unidades; empreendimento maior vai em partes, ver abaixo), `im_anotar_falha`, `im_falhar_coleta` e `im_fechar_coleta`. A interface é `FonteMercado`. Os adaptadores são `orulo_login` (login de corretor nas rotas internas do site), `orulo_api` (API oficial v2, OAuth2 client credentials; ver "API oficial" abaixo) e `orulo_planilha` (leitor à espera de amostra real). As tabelas que ele lê são `im_ids_externos` e `im_empreendimento_estados`. O prefixo `im_` é minúsculo e sem aspas. Não há `empresa_id`.
 
 Não há credencial no repositório. Os crons rodam no Google Cloud Run, nos jobs `coleta-mensal` e `coleta-lancamentos` (projeto `bkm-monitor`, ver [cloud-run.md](cloud-run.md)).
 
@@ -134,6 +134,7 @@ Saída 0 quando a coleta fecha completa, 2 quando fica incompleta, 3 quando falh
 | --- | --- |
 | `ORULO_EMAIL`, `ORULO_PASSWORD` | Login do `orulo_login`. Obrigatórias nessa fonte. |
 | `ORULO_CLIENT_ID`, `ORULO_CLIENT_SECRET` | OAuth2 client credentials do `orulo_api` (`POST /oauth/token`). Sem as duas, o adaptador não chama a rede. |
+| `COLETAR_FONTE` | `orulo_login` (padrão) ou `orulo_api`, quando `--fonte` não vem na linha de comando. É a chave para o job trocar de fonte. |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | API do Supabase. A chave não vai para o repositório. |
 | `ORULO_ATRASO_MIN`, `ORULO_ATRASO_MAX` | Espera entre pedidos, em segundos. Padrão 2 e 3. |
 | `COLETAR_TIPO` | `mensal` ou `lancamentos`, quando `--tipo` não vem na linha de comando. É o que os jobs do Cloud Run definem. |
@@ -185,3 +186,22 @@ cd tools/coletar && python3 -m pytest -q
 ```
 
 Os testes do coletor usam as amostras `testes/fixtures/` (`detail_83029.json`, `units_83029.json`, `elastic_sample.json`) e HTTP simulado. A rodada ponta a ponta sobe um Postgres 16 temporário e chama as funções reais. Não há pedido ao Órulo nem a um Supabase remoto.
+
+## API oficial (`orulo_api`)
+
+Contrato: OpenAPI v2.0.92 em documento.orulo.com.br, conferido com a integração de homologação da BKM em 26/nov/2026.
+
+- Token em `POST /oauth/token` (client credentials), validade de cerca de 1 ano. 401 pede token novo uma vez.
+- Listagem em `GET /api/v2/buildings` por UF e cidade, com os mesmos filtros da descoberta do `orulo_login` (obra e pronto novo, residencial). A API devolve no máximo 50 por página, mesmo pedindo mais, e no máximo 10 mil por filtro; `results_limit_exceeded` deixa a coleta incompleta.
+- Detalhe em `GET /api/v2/buildings/{id}?include[]=not_available`. Unidades em `GET /api/v2/buildings/{id}/units` com `include[]=not_available` e os status `available`, `reserved`, `sold`, num pedido só: a rota ignora `page` e devolve tudo.
+- O formato do empreendimento e da unidade é o mesmo do portal; `mapeamento.py` não muda.
+- Empreendimento listado com detalhe 404 vira falha `nao_encontrado` (acontece na homologação).
+- O `disclaimer` da listagem vai para o bruto e para os avisos da rodada.
+
+Mesmos empreendimentos: o número do Órulo é o mesmo nas duas fontes. A migration `20261126190000_fonte_orulo_api` faz `orulo_api` usar os ids gravados como `orulo_login` (`im_fonte_ids`), então a coleta pela API atualiza o que já existe e só cria o que é novo. O fechamento acha a mensal anterior das duas fontes, para a primeira mensal pela API comparar com a última do login e gravar a venda.
+
+O que não vem pela API:
+
+- Tabela de preços (categoria social HIS/HMP por unidade). A API só entrega arquivo com login de corretor (`oruloEndUserAuth`) e proíbe gravar o que vem por ele. Com `COLETAR_FONTE=orulo_api` a etapa das tabelas não roda; `programa_social` do cadastro e a etapa dos alvarás continuam.
+- VSO e histórico: a API só tem o estado atual (o histórico veio do relatório de 36 meses).
+- O que o plano não libera. A integração de homologação lista 132 empreendimentos, só na cidade de São Paulo, e 83 deles dão 404 no detalhe; o `orulo_login` vê cerca de 1.430 na semanal. Não trocar o job antes da credencial de produção cobrir a região inteira (RMSP e São José dos Campos), com unidades e `not_available`.

@@ -27,6 +27,15 @@ class ContextoColeta:
     ids: tuple[str, ...] = ()
 
 
+def fonte_ids(nome: str) -> str:
+    """Fonte cujo espaço de ids vale para esta fonte (igual a im_fonte_ids no banco).
+
+    orulo_api e orulo_login usam o mesmo número do Órulo; os ids ficam gravados
+    como orulo_login.
+    """
+    return "orulo_login" if nome == "orulo_api" else nome
+
+
 def deve_abrir(ctx: ContextoColeta, id_externo: str) -> bool:
     """Diz se este empreendimento entra na rodada com detalhe e unidades.
 

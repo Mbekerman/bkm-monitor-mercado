@@ -82,3 +82,24 @@ gcloud run jobs update coleta-mensal \
   --region=southamerica-east1 \
   --image=southamerica-east1-docker.pkg.dev/bkm-monitor/monitor/coletar:TAG
 ```
+
+## Trocar a fonte para a API oficial
+
+Só com a credencial de produção do Órulo (a de homologação lista 132 empreendimentos; ver "API oficial" em [coletar.md](coletar.md)). A migration `20261126190000_fonte_orulo_api` precisa estar aplicada antes.
+
+```bash
+printf '%s' "$CLIENT_ID" | gcloud secrets create ORULO_CLIENT_ID --project=bkm-monitor --data-file=-
+printf '%s' "$CLIENT_SECRET" | gcloud secrets create ORULO_CLIENT_SECRET --project=bkm-monitor --data-file=-
+for job in coleta-lancamentos coleta-mensal; do
+  gcloud run jobs update "$job" --project=bkm-monitor --region=southamerica-east1 \
+    --update-secrets=ORULO_CLIENT_ID=ORULO_CLIENT_ID:latest,ORULO_CLIENT_SECRET=ORULO_CLIENT_SECRET:latest \
+    --update-env-vars=COLETAR_FONTE=orulo_api
+done
+```
+
+A conta de serviço do job precisa de `roles/secretmanager.secretAccessor` nos dois segredos. Para voltar ao login: `--update-env-vars=COLETAR_FONTE=orulo_login`. Antes de trocar a agenda, teste alguns ids que já estão no banco:
+
+```bash
+gcloud run jobs execute coleta-lancamentos --project=bkm-monitor --region=southamerica-east1 --wait \
+  --args=--fonte,orulo_api,--id,73073
+```
